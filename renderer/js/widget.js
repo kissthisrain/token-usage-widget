@@ -323,16 +323,17 @@ function renderTrend(trend) {
 function renderHeatmap(heatmap) {
   const el = $('heatmapChart');
   const chart = state.heatmapChart || (state.heatmapChart = echarts.init(el));
-  // 剔除 0 消耗天：让它们走 itemStyle 底色（近透明），与有消耗天彻底区分
-  const data = heatmap.filter((d) => d.tokens > 0).map((d) => [d.date, d.tokens]);
+  // 保留全部数据（含 0 消耗天），让 visualMap 统一着色：0 → 浅灰，>0 → 青绿分档
+  const data = heatmap.map((d) => [d.date, d.tokens]);
   // 分位数分档着色：低消耗天也能落在可见色阶上（避免线性映射把极小值压成无色）
-  const vals = data.map(([, v]) => v).sort((a, b) => a - b);
+  const vals = data.map(([, v]) => v).filter((v) => v > 0).sort((a, b) => a - b);
   const q = (p) => vals[Math.min(vals.length - 1, Math.floor(vals.length * p))];
   const boundaries = vals.length
     ? [...new Set([q(0.25), q(0.5), q(0.75), q(0.9), vals[vals.length - 1]])]
     : [];
   const PALETTE = [0.42, 0.55, 0.68, 0.8, 0.9, 0.96].map((a) => `rgba(45,212,191,${a})`);
-  const pieces = [];
+  const GRAY = 'rgba(180,190,200,0.28)'; // 浅灰：统一走 visualMap 着色，与有 token 格子同路径
+  const pieces = [{ min: 0, max: 0, color: GRAY }]; // 0 消耗天 → 浅灰
   let lo = 0;
   for (let i = 0; i < boundaries.length; i++) {
     // 档位少时也均匀取色：最低档 0.42 可见，最高档接近满色
@@ -361,7 +362,7 @@ function renderHeatmap(heatmap) {
       cellSize: ['auto', 11],       // 紧凑 GitHub 风格：11px 行高（避免扁），宽度自动撑满容器
       range: [first, heatmap[heatmap.length - 1].date],
       splitLine: { show: false },
-      itemStyle: { color: 'rgba(255,255,255,0.05)', borderWidth: 2, borderColor: 'rgba(0,0,0,0)' },
+      itemStyle: { color: 'transparent', borderWidth: 4, borderColor: 'rgba(0,0,0,0)' },
       dayLabel: { show: false },
       monthLabel: {
         show: true,
@@ -373,7 +374,15 @@ function renderHeatmap(heatmap) {
       },
       yearLabel: { show: false },
     },
-    series: [{ type: 'heatmap', coordinateSystem: 'calendar', data }],
+    series: [{
+      type: 'scatter',
+      coordinateSystem: 'calendar',
+      symbol: 'roundRect',
+      symbolSize: () => [11, 11], // 略小于 cellSize 11，留出间隙；圆角由 symbol 决定
+      itemStyle: { color: '#2dd4bf' }, // 兜底色（visualMap 未命中时使用）
+      encode: { tooltip: 1 },
+      data,
+    }],
   });
   window.__heatmapChart = chart; // 调试转储用
 }
