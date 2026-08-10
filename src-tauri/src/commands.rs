@@ -166,27 +166,23 @@ pub async fn export_data(
     Ok(OkResult { ok: true, error: None, path: Some(path.to_string_lossy().to_string()) })
 }
 
-// ---- 代理（二期实现） ----
+// ---- 代理（OpenCode Go 本地代理） ----
 
 #[tauri::command]
-pub fn proxy_status(_state: State<AppState>) -> serde_json::Value {
-    serde_json::json!({
-        "running": false,
-        "port": null,
-        "host": "127.0.0.1",
-        "baseUrl": null,
-        "hint": "本地代理将在二期版本提供（当前版本仅本地估算）"
-    })
+pub async fn proxy_status(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    Ok(state.go_proxy.status())
 }
 
 #[tauri::command]
-pub fn proxy_start() -> serde_json::Value {
-    serde_json::json!({ "ok": false, "status": null, "error": "本地代理将在二期版本提供" })
+pub async fn proxy_start(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let ok = state.go_proxy.start().await;
+    Ok(serde_json::json!({ "ok": ok, "status": state.go_proxy.status() }))
 }
 
 #[tauri::command]
-pub fn proxy_stop() -> serde_json::Value {
-    serde_json::json!({ "ok": true, "status": { "running": false } })
+pub async fn proxy_stop(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    state.go_proxy.stop();
+    Ok(serde_json::json!({ "ok": true, "status": state.go_proxy.status() }))
 }
 
 // ---- 窗口控制（async：窗口创建/尺寸调整等 WebView2 操作不能在主线程阻塞，

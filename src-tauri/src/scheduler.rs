@@ -236,7 +236,68 @@ impl SchedulerFork {
                 );
                 Ok(())
             }
-            // 二期：opencode-go 官方抓取（workspaceId + authCookie 时）
+            // opencode-go：配置了工作区 ID + Cookie → 官方用量抓取（未配置走 snapshot 本地估算）
+            "opencode-go" if src.workspace_id.is_some() && src.auth_cookie.is_some() => {
+                let r = crate::sources::opencode_go::probe_quota(src).await;
+                if r.ok {
+                    this.history.set_quota(
+                        &src.id,
+                        crate::history::QuotaInfo {
+                            source_id: Some(src.id.clone()),
+                            mode: Some("opencode-go-official".to_string()),
+                            items: r.items.clone(),
+                            ok: Some(true),
+                            currency: Some("USD".to_string()),
+                            official: Some(true),
+                            at: now_ms(),
+                            ..Default::default()
+                        },
+                    );
+                    log::info!(
+                        "[scheduler] {}: 官方用量更新 ({})",
+                        src.name,
+                        r.items
+                            .iter()
+                            .map(|i| format!(
+                                "{} {:.1}%",
+                                i.key.clone().unwrap_or_default(),
+                                i.used_pct.unwrap_or(0.0)
+                            ))
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    );
+                } else {
+                    // 保留上次成功数据，仅附加错误
+                    let prev = this.history.data().quota.get(&src.id).cloned();
+                    this.history.set_quota(
+                        &src.id,
+                        crate::history::QuotaInfo {
+                            source_id: Some(src.id.clone()),
+                            mode: Some("opencode-go-official".to_string()),
+                            items: prev.map(|q| q.items).unwrap_or_default(),
+                            ok: Some(false),
+                            error: r.error.clone(),
+                            currency: Some("USD".to_string()),
+                            official: Some(true),
+                            at: now_ms(),
+                            ..Default::default()
+                        },
+                    );
+                    log::warn!(
+                        "[scheduler] {}: {}",
+                        src.name,
+                        r.error.clone().unwrap_or_default()
+                    );
+                }
+                let _ = this.app.emit(
+                    "data:update",
+                    DataUpdate {
+                        source_id: Some(src.id.clone()),
+                        ..Default::default()
+                    },
+                );
+                Ok(())
+            }
             _ => Ok(()),
         }
     }

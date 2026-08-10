@@ -26,7 +26,7 @@
 | **兼容中转站** | Base URL + API Key | 自动探测常见余额接口，或自定义 URL + 字段映射 |
 | **OpenCode Go** | 本地代理（端口） | 客户端指向 `http://127.0.0.1:<端口>`，代理转发到 `opencode.ai/zen/go` 并记录每次请求，对照官方限额计算剩余% |
 
-> ⏳ 一期状态：本地代理（SSE 流式转发）与 OpenCode Go 官方用量抓取在二期实现，当前 OpenCode Go 使用本地估算（`Go 估算`）。
+> ⏳ 二期状态：本地代理（SSE 流式转发）与 OpenCode Go 官方用量抓取已实现（v0.1.0 全功能）。
 
 ## 环境要求
 
@@ -69,9 +69,16 @@ cargo run -p token-usage-widget -- --smoke   # 或构建后运行 exe --smoke
 1. 启动后自动探测本机工具（ZCode / Codex / OpenCode CLI），勾选启用即可看到真实数据
 2. 需要 API 类数据源时：设置 → 数据源 → 添加 → 填写配置 → 「测试连接」
 
-### OpenCode Go 官方剩余用量查询（二期支持）
+### OpenCode Go 官方剩余用量查询
 
-OpenCode Go **没有公开的用量 JSON API**，官方剩余额度在二期通过「登录态 Cookie + 工作区 ID」抓取控制台页面获取（当前版本显示本地估算）。
+OpenCode Go **没有公开的用量 JSON API**（`/v1/usage`、`/v1/balance` 均返回 404），剩余额度只存在于官网控制台页面。小组件通过「登录态 Cookie + 工作区 ID」抓取控制台内嵌数据，拿到**官方权威**的 5 小时 / 每周 / 每月剩余用量（本地代理估算只统计本机，官方数据包含所有设备）。
+
+1. 浏览器登录 [opencode.ai](https://opencode.ai) → 打开用量控制台，地址栏形如 `https://opencode.ai/workspace/{id}/go`，复制 `wrk_` 开头的**工作区 ID**
+2. 控制台页面按 `F12` → Application / 存储 → Cookies → `opencode.ai`，复制名为 `auth` 的 Cookie 值
+3. 设置 → OpenCode Go 数据源 → 填入「工作区 ID」与「Auth Cookie」→ 保存 → 点「测试连接」验证
+4. 之后小组件定时刷新官方数据，配额卡片标记「Go 官方」；未配置或 Cookie 失效时自动回退为本地代理估算（标记「Go 估算」）
+
+> ⚠️ Cookie 等同你的登录态，**仅保存在本机配置文件**中，请勿外传；若提示「会话已过期」，重新登录后复制最新 Cookie 即可。
 
 ## 开发命令
 
@@ -91,6 +98,5 @@ npm run icon           # 重新生成应用图标（resources/icon-1024.png → 
 ## 已知限制
 
 - OpenAI 用量接口需组织管理员 Key（普通 Key 会 403，测试连接会给出明确提示）
-- 一期版本：OpenCode Go 本地代理与官方用量抓取未实现（显示本地估算）
-- 本地 rollout 文件可能只保留近期，历史数据以 `.codex/sessions` 为主
+- 本地 rollout 文件可能只保留近期，历史数据以 `.codex/sessions` 为主（ZCode 以 `db.sqlite` 为权威口径，周期回填）
 - 若同时启用「本地记录」与「OpenAI 官方」统计同一提供商，数据会重复，建议二选一

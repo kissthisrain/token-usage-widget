@@ -6,6 +6,7 @@ mod detect;
 mod events;
 mod history;
 mod http;
+mod proxy;
 mod scheduler;
 mod smoke;
 mod snapshot;
@@ -35,6 +36,7 @@ pub struct AppState {
     pub watcher: Arc<Watcher>,
     pub scheduler: Arc<Scheduler>,
     pub win_mgr: Arc<WindowMgr>,
+    pub go_proxy: Arc<proxy::GoProxy>,
     pub hotkey_registered: Mutex<Option<Shortcut>>,
 }
 
@@ -85,6 +87,19 @@ pub fn run() {
                 app_handle.clone(),
             ));
             let win_mgr = Arc::new(WindowMgr::new(app_handle.clone(), config.clone()));
+            let go_proxy = Arc::new(proxy::GoProxy::new(
+                {
+                    let config = config.clone();
+                    Arc::new(move || {
+                        config
+                            .get_sources(false)
+                            .into_iter()
+                            .find(|s| s.type_ == "opencode-go")
+                    })
+                },
+                history_store.clone(),
+                app_handle.clone(),
+            ));
 
             let state = AppState {
                 config: config.clone(),
@@ -92,6 +107,7 @@ pub fn run() {
                 watcher: watcher.clone(),
                 scheduler: scheduler.clone(),
                 win_mgr: win_mgr.clone(),
+                go_proxy: go_proxy.clone(),
                 hotkey_registered: Mutex::new(None),
             };
             app.manage(state);
@@ -99,6 +115,18 @@ pub fn run() {
             // 核心服务
             watcher.restart();
             scheduler.start();
+            // OpenCode Go 本地代理（源启用时自动启动）
+            {
+                let st = app.state::<AppState>();
+                if let Some(src) = st.go_proxy.source() {
+                    if src.enabled {
+                        let gp = st.go_proxy.clone();
+                        tauri::async_runtime::spawn(async move {
+                            gp.start().await;
+                        });
+                    }
+                }
+            }
 
             // 窗口
             win_mgr.create_widget();
@@ -162,6 +190,17 @@ pub fn run() {
 pub fn reinit_core(app: &AppHandle, state: &AppState) {
     state.watcher.restart();
     state.scheduler.start();
+    // OpenCode Go 代理：源启用且未运行 → 启动；禁用或删除 → 停止
+    let src = state.go_proxy.source();
+    let should_run = src.as_ref().map(|s| s.enabled).unwrap_or(false);
+    if should_run && !state.go_proxy.is_running() {
+        let gp = state.go_proxy.clone();
+        tauri::async_runtime::spawn(async move {
+            gp.start().await;
+        });
+    } else if !should_run && state.go_proxy.is_running() {
+        state.go_proxy.stop();
+    }
     if let Err(e) = register_hotkey(app, state) {
         log::warn!("热键重注册失败: {e}");
     }
