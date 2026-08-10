@@ -1,20 +1,15 @@
 {
   "name": "token-usage-widget",
   "version": "0.1.0",
-  "description": "Windows 桌面 Token 用量小组件 - 实时展示模型提供商 token 消耗/配额/趋势",
-  "main": "main/main.js",
+  "description": "Windows 桌面 Token 用量小组件 - 实时展示模型提供商 token 消耗/配额/趋势（Rust + Tauri 重写版）",
   "scripts": {
-    "start": "electron .",
-    "smoke": "electron . --smoke",
-    "package": "node scripts/package.js"
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "icon": "node scripts/gen-tauri-icon.js && tauri icon resources/icon-1024.png"
   },
-  "author": "",
+  "author": "kissthisrain",
   "license": "MIT",
   "devDependencies": {
-    "electron": "^43.3.0"
-  },
-  "dependencies": {
-    "echarts": "^6.1.0",
-    "sql.js": "^1.14.1"
+    "@tauri-apps/cli": "^2"
   }
 }

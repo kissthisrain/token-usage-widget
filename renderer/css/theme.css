@@ -68,9 +68,9 @@ html, body {
   padding: 0 16px 14px;   /* 底部留白：最后一个模块不与导航条贴底 */
 }
 
-/* 拖拽区 */
-.drag { -webkit-app-region: drag; }
-.no-drag { -webkit-app-region: no-drag; }
+/* 拖拽区（Tauri：通过 data-tauri-drag-region 属性实现，WebView2 不支持 -webkit-app-region） */
+.drag { cursor: default; }
+.no-drag { cursor: default; }
 
 /* 数字 */
 .num {

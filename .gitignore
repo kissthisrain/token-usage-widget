@@ -17,3 +17,5 @@ dist/
 # 系统垃圾文件
 Thumbs.db
 .DS_Store
+src-tauri/target/
+src-tauri/gen/schemas/

@@ -235,7 +235,7 @@ function bindEditor(s) {
   });
 
   $('e-delete').addEventListener('click', async () => {
-    if (!confirm(`删除数据源「${s.name}」？（历史数据保留）`)) return;
+    if (!(await api.ask(`删除数据源「${s.name}」？（历史数据保留）`))) return;
     cfg.sources = cfg.sources.filter((x) => x.id !== s.id);
     selectedId = null;
     renderSrcList();
@@ -312,7 +312,7 @@ async function renderDetections() {
     b.addEventListener('click', () => {
       const t = { id: b.dataset.id, tool: b.dataset.tool, path: b.dataset.path };
       if (cfg.sources.some((s) => s.type === 'local-logs' && normPath(s.path) === normPath(t.path))) {
-        alert('该工具已添加过（路径相同），请勿重复添加以免重复计数');
+        api.alert('该工具已添加过（路径相同），请勿重复添加以免重复计数');
         return;
       }
       const s = {
@@ -457,7 +457,7 @@ async function init() {
     flash(r.ok ? `已导出：${r.path}` : '导出失败', !r.ok);
   });
   $('clearBtn').addEventListener('click', async () => {
-    if (!confirm('确定清除全部历史用量数据？此操作不可恢复。')) return;
+    if (!(await api.ask('确定清除全部历史用量数据？此操作不可恢复。'))) return;
     await api.clearData();
     flash('已清除全部数据');
   });
