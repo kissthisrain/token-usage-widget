@@ -1,0 +1,155 @@
+/* ===== 主题变量（玻璃拟态深色） ===== */
+:root {
+  --bg: rgba(20, 22, 32, 0.55);       /* 半透明深色玻璃底（0.5~0.7 区间）：叠在 acrylic 真模糊之上，深色玻璃质感 */
+  --bg-soft: rgba(255, 255, 255, 0.05);
+  --bg-hover: rgba(255, 255, 255, 0.10);
+  --border: rgba(255, 255, 255, 0.15);        /* 极细高亮边框 */
+  --border-strong: rgba(255, 255, 255, 0.24);
+
+  --text: #f4f6fb;                    /* 高对比纯白文字 */
+  --text-dim: #aab3c9;
+  --text-faint: #8b94ad;              /* 弱化文字：提亮（玻璃背景上保持可读） */
+
+  --accent: #2dd4bf;                  /* 蓝青数据点缀 */
+  --accent-soft: rgba(45, 212, 191, 0.14);
+  --violet: #8b5cf6;
+  --amber: #fb923c;
+  --red: #f87171;
+
+  --radius: 14px;
+  --radius-sm: 10px;
+
+  --font-num: "Cascadia Mono", "Consolas", "SF Mono", Menlo, monospace;
+  --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  background: transparent;
+  font-family: var(--font-ui);
+  color: var(--text);
+  font-size: 13px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  overflow: hidden;
+}
+
+::-webkit-scrollbar { width: 5px; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.14); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 悬浮卡片：纯半透明深色 + 背景模糊（无自带渐变/纹理）。
+   backdrop-filter 在系统 mica 材质之上叠加模糊，形成磨砂玻璃质感；
+   系统级壁纸模糊由 mica 材质提供（Win11 22H2+），CSS 无法直接模糊桌面。 */
+.card {
+  position: absolute;
+  inset: 5px;
+  background: var(--bg);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: var(--radius);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset,
+    0 12px 40px rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;          /* 关键：flex 子项默认 min-height:auto 不会收缩，
+                             内容超高时会撑破卡片被裁剪；置 0 后内部滚动生效 */
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 0 16px 14px;   /* 底部留白：最后一个模块不与导航条贴底 */
+}
+
+/* 拖拽区 */
+.drag { -webkit-app-region: drag; }
+.no-drag { -webkit-app-region: no-drag; }
+
+/* 数字 */
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+}
+
+/* 通用按钮 */
+button {
+  font-family: var(--font-ui);
+  background: var(--bg-soft);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+button:active { transform: translateY(0.5px); }
+button.primary {
+  background: var(--accent-soft);
+  border-color: rgba(45, 212, 191, 0.4);
+  color: var(--accent);
+}
+button.primary:hover { background: rgba(45, 212, 191, 0.22); }
+button.danger { color: var(--red); border-color: rgba(248, 113, 113, 0.3); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+input, select, textarea {
+  font-family: var(--font-ui);
+  background: rgba(10, 12, 18, 0.6);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, select:focus, textarea:focus { border-color: rgba(45, 212, 191, 0.5); }
+input::placeholder, textarea::placeholder { color: var(--text-faint); }
+select option { background: #151821; }
+
+/* 进度条 */
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.07);
+  overflow: hidden;
+}
+.bar > i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #14b8a6, #2dd4bf);
+  transition: width 0.6s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+.bar.violet > i { background: linear-gradient(90deg, #7c3aed, #a78bfa); }
+.bar.amber > i { background: linear-gradient(90deg, #ea8a3a, #fbbf24); }
+.bar.red > i { background: linear-gradient(90deg, #dc2626, #f87171); }
+
+/* 标签胶囊 */
+.pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: var(--text-dim);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.pill:hover { color: var(--text); }
+.pill.active {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}

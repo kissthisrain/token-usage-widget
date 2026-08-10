@@ -1,0 +1,20 @@
+{
+  "name": "token-usage-widget",
+  "version": "0.1.0",
+  "description": "Windows 桌面 Token 用量小组件 - 实时展示模型提供商 token 消耗/配额/趋势",
+  "main": "main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "smoke": "electron . --smoke",
+    "package": "node scripts/package.js"
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^43.3.0"
+  },
+  "dependencies": {
+    "echarts": "^6.1.0",
+    "sql.js": "^1.14.1"
+  }
+}

@@ -1,0 +1,19 @@
+# 依赖与构建产物
+node_modules/
+dist/
+
+# Electron 运行时数据(可能包含会话/Cookie 等敏感信息,勿提交)
+.tmp-userdata/
+
+# 内部开发文档(含本机路径信息,勿提交)
+.zcode/
+
+# 调试产物
+.verify-heatmap.png
+
+# 日志
+*.log
+
+# 系统垃圾文件
+Thumbs.db
+.DS_Store

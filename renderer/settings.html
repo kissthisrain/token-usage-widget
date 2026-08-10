@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'" />
+  <title>设置</title>
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/settings.css" />
+</head>
+<body class="win">
+  <!-- 自定义标题栏 -->
+  <header class="titlebar drag">
+    <span class="title">设置</span>
+    <div class="win-btns no-drag">
+      <button id="minBtn" class="wb" title="最小化">─</button>
+      <button id="closeBtn" class="wb" title="关闭">✕</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <nav class="tabs">
+      <button class="tab active" data-tab="sources">数据源</button>
+      <button class="tab" data-tab="general">通用</button>
+      <button class="tab" data-tab="about">关于</button>
+    </nav>
+
+    <div class="content">
+
+      <!-- ===== 数据源 ===== -->
+      <section id="tab-sources" class="tab-pane active">
+        <div class="src-layout">
+          <div class="src-list">
+            <div id="srcItems" class="src-items"></div>
+            <select id="addType" class="add-src">
+              <option value="">＋ 添加数据源…</option>
+              <option value="local-logs">本地记录（ZCode / Codex）</option>
+              <option value="openai">OpenAI 官方用量</option>
+              <option value="compat">OpenAI 兼容中转站</option>
+              <option value="opencode-go">OpenCode Go 套餐（本地代理）</option>
+            </select>
+            <button id="rescanBtn" class="link-btn">🔍 重新检测本机工具</button>
+            <div id="detectResults" class="detect-results"></div>
+          </div>
+          <div id="srcEdit" class="src-edit"></div>
+        </div>
+      </section>
+
+      <!-- ===== 通用 ===== -->
+      <section id="tab-general" class="tab-pane">
+        <div class="g-card">
+          <div class="g-title">刷新与展示</div>
+          <div class="g-row">
+            <label>API 拉取间隔（分钟）</label>
+            <input type="number" id="gInterval" min="1" max="1440" />
+          </div>
+          <div class="g-row">
+            <label>全局热键（显示/隐藏）</label>
+            <input id="gHotkey" placeholder="如 CommandOrControl+Alt+U" />
+          </div>
+          <div class="g-row">
+            <label>开机自启</label>
+            <label class="switch"><input type="checkbox" id="gAutoLaunch" /><span></span></label>
+          </div>
+          <div class="g-row">
+            <label>窗口不透明度</label>
+            <div class="slider" id="gOpacity" role="slider" aria-valuemin="20" aria-valuemax="100" tabindex="0" title="拖动调节（20%~100%）">
+              <div class="slider-track"><div class="slider-fill" id="gOpacityFill"></div></div>
+              <div class="slider-thumb" id="gOpacityThumb"></div>
+            </div>
+            <span id="gOpacityVal" class="g-val">94%</span>
+          </div>
+        </div>
+        <div class="g-card">
+          <div class="g-title">显示区块</div>
+          <div class="g-row">
+            <label>显示费用</label>
+            <label class="switch"><input type="checkbox" id="gShowCost" /><span></span></label>
+          </div>
+          <div class="g-row">
+            <label>显示额度（配额）区块</label>
+            <label class="switch"><input type="checkbox" id="gShowQuota" /><span></span></label>
+          </div>
+          <div class="g-row">
+            <label>显示趋势图与热力图</label>
+            <label class="switch"><input type="checkbox" id="gShowCharts" /><span></span></label>
+          </div>
+          <div class="g-row">
+            <label>显示模型明细列表</label>
+            <label class="switch"><input type="checkbox" id="gShowModelList" /><span></span></label>
+          </div>
+        </div>
+        <div class="g-card danger">
+          <div class="g-title">数据管理</div>
+          <div class="g-row">
+            <button id="refreshNowBtn">立即刷新全部数据源</button>
+            <button id="exportBtn">导出数据（JSON）</button>
+            <button id="clearBtn" class="danger">清除全部数据</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ===== 关于 ===== -->
+      <section id="tab-about" class="tab-pane">
+        <div class="g-card">
+          <div class="g-title">Token 用量小组件 <span class="ver">v0.1.0</span></div>
+          <p class="about-text">
+            实时展示本机 AI 工具的 token 消耗、额度剩余与使用趋势。
+            数据来源：
+          </p>
+          <ul class="about-list">
+            <li><b>本地记录</b>：实时监听 ZCode / Codex 的会话日志（无需配置，自动探测）</li>
+            <li><b>OpenAI 官方</b>：用量 API，需组织管理员 Key</li>
+            <li><b>兼容中转站</b>：自动探测常见余额接口，或自定义 URL + 字段映射</li>
+            <li><b>OpenCode Go</b>：本地代理记录每次请求，对照官方限额（5h $12 / 周 $30 / 月 $60）计算剩余%</li>
+          </ul>
+          <p class="about-text dim">
+            提示：本地记录与 API 用量可能统计同一份用量，建议同一提供商只启用一种来源。
+          </p>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <footer class="footbar">
+    <span id="saveStatus" class="save-status"></span>
+    <button id="saveBtn" class="primary">保存设置</button>
+  </footer>
+
+  <script src="js/format.js"></script>
+  <script src="js/settings.js"></script>
+</body>
+</html>

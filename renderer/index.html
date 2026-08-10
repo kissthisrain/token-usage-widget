@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'" />
+  <title>Token 用量</title>
+  <link rel="stylesheet" href="css/theme.css" />
+  <link rel="stylesheet" href="css/widget.css" />
+</head>
+<body>
+  <div class="card">
+
+    <!-- ===== 引导页（首次启动/无数据源时） ===== -->
+    <div id="onboarding" class="onboarding hidden">
+      <div class="ob-head drag">
+        <div class="brand"><span class="sig">Σ</span><span class="dot">.</span></div>
+        <div class="ob-title">Token 用量小组件</div>
+      </div>
+      <div class="scroll">
+        <div class="ob-intro">
+          自动探测到以下本机工具，勾选启用后即可展示真实用量数据：
+        </div>
+        <div id="ob-tools" class="ob-tools"></div>
+        <div class="ob-actions">
+          <button id="ob-enable" class="primary">启用所选并展示</button>
+          <button id="ob-settings">打开设置</button>
+          <button id="ob-refresh">重新检测</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 主视图 ===== -->
+    <div id="main" class="main hidden">
+
+      <!-- 头部 -->
+      <header class="head drag">
+        <button id="pinBtn" class="pin-btn no-drag" title="钉在前排（置顶）" aria-pressed="false">
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
+            <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
+          </svg>
+        </button>
+        <div class="pills no-drag" id="pills">
+          <span class="pill" data-range="day">DAY</span>
+          <span class="pill active" data-range="month">MONTH</span>
+          <span class="pill" data-range="total">TOTAL</span>
+        </div>
+      </header>
+
+      <div class="scroll" id="scroll">
+
+        <!-- 总览 -->
+        <section class="overview">
+          <div class="stat">
+            <div class="label">TOTAL TOKENS</div>
+            <div class="hero num" id="totalTokens">0</div>
+          </div>
+          <div class="stat cost">
+            <div class="label">总费用</div>
+            <div class="value num" id="totalCost">—</div>
+          </div>
+        </section>
+
+        <!-- 额度 -->
+        <section id="quotaSection" class="quota hidden">
+          <div class="section-title"><span>额度</span>
+            <span class="st-actions"><button class="st-ico" data-refresh title="立即刷新">⟳</button></span>
+          </div>
+          <div id="quotaList" class="quota-list"></div>
+        </section>
+
+        <!-- 模型明细 -->
+        <section id="modelsSection" class="models hidden">
+          <div class="section-title"><span>模型</span>
+            <span class="st-actions"><button class="st-ico" data-refresh title="立即刷新">⟳</button></span>
+          </div>
+          <div id="modelList" class="model-list"></div>
+        </section>
+
+        <!-- 活动 -->
+        <section id="activitySection" class="activity hidden">
+          <div class="section-title"><span>活跃 · <span id="activeDays" class="num">0</span> 天</span>
+            <span class="st-actions"><button class="st-ico" title="热力图">▦</button></span>
+          </div>
+          <div id="heatmapChart" class="chart heatmap-chart"></div>
+        </section>
+
+        <!-- 趋势 -->
+        <section id="trendSection" class="trend hidden">
+          <div class="section-title"><span>趋势</span>
+            <span class="st-actions"><button class="st-ico" data-refresh title="立即刷新">⟳</button></span>
+          </div>
+          <div id="trendChart" class="chart"></div>
+        </section>
+
+      </div>
+
+      <!-- 底部导航 -->
+      <footer class="foot drag">
+        <div class="src-box no-drag">
+          <span class="src-ico">◈</span>
+          <select id="sourceFilter"></select>
+          <span class="chev">▾</span>
+        </div>
+        <div class="foot-right no-drag">
+          <span id="liveDot" class="live-dot" title="实时监听中"></span>
+          <button id="settingsBtn" class="icon-btn" title="设置">⚙</button>
+        </div>
+      </footer>
+    </div>
+
+  </div>
+
+  <script src="../lib/echarts.min.js"></script>
+  <script src="js/format.js"></script>
+  <script src="js/widget.js"></script>
+</body>
+</html>
