@@ -253,7 +253,12 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         _ => {}
     };
     let on_tray = move |tray: &tauri::tray::TrayIcon, event: TrayIconEvent| {
-        if let TrayIconEvent::Click { .. } = event {
+        // 只响应左键单击（右键会弹出菜单，若也触发 toggle 会抢焦点导致菜单闪退）
+        if let TrayIconEvent::Click {
+            button: tauri::tray::MouseButton::Left,
+            ..
+        } = event
+        {
             let app = tray.app_handle();
             if let Some(st) = app.try_state::<AppState>() {
                 st.win_mgr.toggle_widget();
