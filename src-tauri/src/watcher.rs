@@ -24,6 +24,8 @@ use tokio::sync::mpsc;
 const POLL_MS: u64 = 30000;
 const STALL_MS: i64 = 3 * 60000;
 const STALL_MIN_DELTA: u64 = 1024 * 1024;
+/// sqlite 权威数据周期回填间隔（纠正 rollout 增量的瞬时误差）
+const SQLITE_REIMPORT_MS: u64 = 5 * 60 * 1000;
 
 pub struct Watcher {
     inner: Arc<WatcherInner>,
@@ -85,6 +87,19 @@ impl Watcher {
                     break;
                 }
                 inner3.poll_all();
+                interval.tick().await;
+            }
+        });
+        // 每 5 分钟用 sqlite 权威数据整体回填（幂等），纠正 rollout 增量误差
+        let inner4 = inner.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(SQLITE_REIMPORT_MS));
+            interval.tick().await; // 首次立即
+            loop {
+                if inner4.stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                inner4.reimport_sqlite();
                 interval.tick().await;
             }
         });
@@ -393,6 +408,34 @@ impl WatcherInner {
         if end_offset > start {
             self.history.set_file_offset(&src.id, &file.to_string_lossy(), end_offset);
             self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+        }
+    }
+    /// 对所有启用且允许导入的 zcode 源执行 sqlite 回填（spawn_blocking）
+    fn reimport_sqlite(&self) {
+        let sources = (self.get_sources)();
+        for src in &sources {
+            if src.type_ != "local-logs" || !src.enabled {
+                continue;
+            }
+            if src.tool.as_deref() != Some("zcode") || src.import_sqlite == Some(false) {
+                continue;
+            }
+            let src = src.clone();
+            let history = self.history.clone();
+            let app = self.app.clone();
+            tauri::async_runtime::spawn(async move {
+                let r = import_zcode_history(&src, history).await;
+                if r.days > 0 {
+                    let _ = app.emit(
+                        "data:update",
+                        DataUpdate {
+                            source_id: Some(src.id.clone()),
+                            count: Some(r.imported),
+                            ..Default::default()
+                        },
+                    );
+                }
+            });
         }
     }
 }

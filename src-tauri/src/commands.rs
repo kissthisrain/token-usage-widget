@@ -34,25 +34,28 @@ pub struct OkResult {
 }
 
 #[tauri::command]
-pub fn get_snapshot(state: State<AppState>, opts: Option<SnapshotOpts>) -> Snapshot {
+pub async fn get_snapshot(
+    state: State<'_, AppState>,
+    opts: Option<SnapshotOpts>,
+) -> Result<Snapshot, String> {
     let o = opts.unwrap_or_default();
-    build_snapshot(
+    Ok(build_snapshot(
         &state.config,
         &state.history,
         if o.range.is_empty() { "month" } else { &o.range },
         if o.source_id.is_empty() { "all" } else { &o.source_id },
-    )
+    ))
 }
 
 #[tauri::command]
-pub fn get_config(state: State<AppState>) -> Config {
-    state.config.load()
+pub async fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
+    Ok(state.config.load())
 }
 
 #[tauri::command]
-pub fn save_config(
+pub async fn save_config(
     app: AppHandle,
-    state: State<AppState>,
+    state: State<'_, AppState>,
     cfg: Config,
 ) -> Result<OkResult, String> {
     state.config.replace_and_save(cfg);
@@ -90,17 +93,21 @@ pub async fn refresh_all(state: State<'_, AppState>) -> Result<OkResult, String>
 }
 
 #[tauri::command]
-pub fn detect_scan(_state: State<AppState>) -> Vec<Detection> {
-    crate::detect::scan_all()
+pub async fn detect_scan(_state: State<'_, AppState>) -> Result<Vec<Detection>, String> {
+    Ok(crate::detect::scan_all())
 }
 
 #[tauri::command]
-pub fn get_autolaunch(app: AppHandle) -> bool {
+pub async fn get_autolaunch(app: AppHandle) -> bool {
     crate::autolaunch_current(&app)
 }
 
 #[tauri::command]
-pub fn set_autolaunch(app: AppHandle, state: State<AppState>, v: bool) -> Result<OkResult, String> {
+pub async fn set_autolaunch(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    v: bool,
+) -> Result<OkResult, String> {
     let r = crate::set_autolaunch_value(&app, v);
     let mut c = state.config.get();
     c.general.auto_launch = v;
@@ -109,7 +116,10 @@ pub fn set_autolaunch(app: AppHandle, state: State<AppState>, v: bool) -> Result
 }
 
 #[tauri::command]
-pub fn clear_data(app: AppHandle, state: State<AppState>) -> Result<OkResult, String> {
+pub async fn clear_data(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<OkResult, String> {
     state.history.clear();
     let _ = app.emit(
         "data:update",
@@ -179,50 +189,51 @@ pub fn proxy_stop() -> serde_json::Value {
     serde_json::json!({ "ok": true, "status": { "running": false } })
 }
 
-// ---- 窗口控制 ----
+// ---- 窗口控制（async：窗口创建/尺寸调整等 WebView2 操作不能在主线程阻塞，
+//       否则异步完成回调无法到达 → 死锁；异步命令跑在线程池，主线程继续 pump） ----
 
 #[tauri::command]
-pub fn win_open_settings(state: State<AppState>) -> Result<OkResult, String> {
+pub async fn win_open_settings(state: State<'_, AppState>) -> Result<OkResult, String> {
     state.win_mgr.open_settings();
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
 #[tauri::command]
-pub fn win_toggle(state: State<AppState>) -> Result<OkResult, String> {
+pub async fn win_toggle(state: State<'_, AppState>) -> Result<OkResult, String> {
     state.win_mgr.toggle_widget();
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
 #[tauri::command]
-pub fn win_resize(state: State<AppState>, h: f64) -> Result<OkResult, String> {
+pub async fn win_resize(state: State<'_, AppState>, h: f64) -> Result<OkResult, String> {
     state.win_mgr.resize_to_content(h);
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
 #[tauri::command]
-pub fn win_get_pinned(state: State<AppState>) -> bool {
-    state.win_mgr.get_pinned()
+pub async fn win_get_pinned(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(state.win_mgr.get_pinned())
 }
 
 #[tauri::command]
-pub fn win_set_pinned(state: State<AppState>, v: bool) -> bool {
-    state.win_mgr.set_pinned(v)
+pub async fn win_set_pinned(state: State<'_, AppState>, v: bool) -> Result<bool, String> {
+    Ok(state.win_mgr.set_pinned(v))
 }
 
 #[tauri::command]
-pub fn win_minimize(window: Window) -> Result<OkResult, String> {
+pub async fn win_minimize(window: Window) -> Result<OkResult, String> {
     let _ = window.minimize();
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
 #[tauri::command]
-pub fn win_close(window: Window) -> Result<OkResult, String> {
+pub async fn win_close(window: Window) -> Result<OkResult, String> {
     let _ = window.close();
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
 #[tauri::command]
-pub fn app_quit(app: AppHandle) -> Result<OkResult, String> {
+pub async fn app_quit(app: AppHandle) -> Result<OkResult, String> {
     app.exit(0);
     Ok(OkResult { ok: true, error: None, path: None })
 }

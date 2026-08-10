@@ -103,6 +103,10 @@ pub fn run() {
             // 窗口
             win_mgr.create_widget();
             win_mgr.apply_opacity();
+            // 调试：--open-settings 启动即打开设置窗口
+            if std::env::args().any(|a| a == "--open-settings") {
+                win_mgr.open_settings();
+            }
 
             // 托盘
             build_tray(app)?;
@@ -257,13 +261,17 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         }
     };
 
-    TrayIconBuilder::with_id("main")
+    let mut tray_builder = TrayIconBuilder::with_id("main")
         .tooltip("Token 用量小组件")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(on_menu)
-        .on_tray_icon_event(on_tray)
-        .build(app)?;
+        .on_tray_icon_event(on_tray);
+    // Windows 托盘必须显式设置图标，否则任务栏不显示
+    if let Ok(icon) = tauri::image::Image::from_bytes(include_bytes!("../../resources/icon.png")) {
+        tray_builder = tray_builder.icon(icon);
+    }
+    tray_builder.build(app)?;
     Ok(())
 }
 

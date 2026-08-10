@@ -49,8 +49,8 @@ pub fn run() {
     };
 
     // 解析全部本地文件（模拟 watcher 初始扫描）
-    let history = std::sync::Arc::new(HistoryStore::new(&crate::config::user_data_dir()));
-    history.load();
+    // 注意：使用内存模式 HistoryStore，绝不落盘，避免污染真实 history.json
+    let history = std::sync::Arc::new(HistoryStore::new_memory());
     for s in &sources {
         if s.type_ != "local-logs" {
             continue;

@@ -207,7 +207,8 @@ impl WindowMgr {
             let _ = win.set_focus();
             return;
         }
-        let _ = WebviewWindowBuilder::new(&self.app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
+        log::info!("[windows] 创建设置窗口…");
+        let r = WebviewWindowBuilder::new(&self.app, SETTINGS_LABEL, WebviewUrl::App("settings.html".into()))
             .title("设置")
             .inner_size(780.0, 680.0)
             .min_inner_size(640.0, 520.0)
@@ -215,6 +216,7 @@ impl WindowMgr {
             .visible(true)
             .background_color(Color(16, 18, 22, 255))
             .build();
+        log::info!("[windows] 设置窗口创建完成: {:?}", r.is_ok());
     }
 
     pub fn quit(&self) {

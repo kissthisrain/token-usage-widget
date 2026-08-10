@@ -1,5 +1,7 @@
-// ZCode 数据库历史导入：只读 ~/.zcode/cli/db/db.sqlite 的 model_usage 表，回填历史用量
-// 对齐 core/sources/sqlite-import.js：只导「今天之前」、按天幂等替换（setSourceDay）
+// ZCode 数据库历史导入：只读 ~/.zcode/cli/db/db.sqlite 的 model_usage 表，回填用量
+// - db.sqlite 是权威数据源（rollout JSONL 只覆盖部分请求，实测 728/184 条），因此导入**全部**记录（含今天）
+// - 按天幂等替换（setSourceDay），重复运行安全
+// - watcher 启动时 + 周期任务调用，周期覆盖可纠正 rollout 增量的瞬时误差
 
 use crate::config::SourceConfig;
 use crate::history::{DayModel, HistoryStore};
@@ -48,17 +50,9 @@ fn import_blocking(
             }
         }
     };
-    // 今天零点（只导入今天之前）
-    use chrono::{Datelike, Local, TimeZone};
-    let today = Local::now().date_naive();
-    let today_start = Local
-        .with_ymd_and_hms(today.year(), today.month(), today.day(), 0, 0, 0)
-        .single()
-        .map(|dt| dt.timestamp_millis())
-        .unwrap_or_else(crate::util::now_ms);
-
+    // 导入全部记录（含今天）：sqlite 为权威数据源，rollout 文件不完整
     let sql = "SELECT completed_at, model_id, input_tokens, output_tokens, computed_total_tokens \
-               FROM model_usage WHERE completed_at IS NOT NULL AND completed_at < ?";
+               FROM model_usage WHERE completed_at IS NOT NULL";
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
         Err(e) => {
@@ -70,7 +64,7 @@ fn import_blocking(
             }
         }
     };
-    let rows = match stmt.query_map([today_start], |row| {
+    let rows = match stmt.query_map([], |row| {
         Ok((
             row.get::<_, i64>(0)?,
             row.get::<_, Option<String>>(1)?,

@@ -163,6 +163,8 @@ pub struct HistoryStore {
     inner: Arc<Mutex<History>>,
     file: PathBuf,
     gen: Arc<AtomicU64>,
+    /// 内存模式（冒烟测试用）：不读盘不写盘，避免污染真实数据
+    no_persist: bool,
 }
 
 impl HistoryStore {
@@ -171,10 +173,24 @@ impl HistoryStore {
             inner: Arc::new(Mutex::new(History::default())),
             file: dir.join("history.json"),
             gen: Arc::new(AtomicU64::new(0)),
+            no_persist: false,
+        }
+    }
+
+    /// 冒烟测试用：纯内存，绝不落盘
+    pub fn new_memory() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(History::default())),
+            file: PathBuf::from(""),
+            gen: Arc::new(AtomicU64::new(0)),
+            no_persist: true,
         }
     }
 
     pub fn load(&self) {
+        if self.no_persist {
+            return;
+        }
         let h: History = std::fs::read_to_string(&self.file)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
@@ -184,6 +200,9 @@ impl HistoryStore {
 
     /// 防抖写盘：800ms 内合并多次修改（对齐 JS scheduleSave）
     pub fn save_debounced(&self) {
+        if self.no_persist {
+            return;
+        }
         let gen = self.gen.fetch_add(1, Ordering::SeqCst) + 1;
         let inner = self.inner.clone();
         let file = self.file.clone();
@@ -202,6 +221,9 @@ impl HistoryStore {
 
     /// 立即写盘（退出 / 清除等关键路径）
     pub fn save_now(&self) {
+        if self.no_persist {
+            return;
+        }
         let h = self.inner.lock().unwrap();
         if let Ok(json) = serde_json::to_string(&*h) {
             let _ = atomic_write(&self.file, &json);
