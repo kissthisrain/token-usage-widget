@@ -112,6 +112,18 @@ impl WindowMgr {
                 c.window_bounds = Some(WindowBounds { x: Some(x), y: Some(y) });
                 *cfg_store.data.lock().unwrap() = c;
                 cfg_store.save();
+                // 跨屏高度适配：新屏可用高度小于当前窗口高度时自动缩小
+                // （底部内容靠内部滚动可达；只缩不放，避免 resize 死循环）
+                if let Ok(Some(m)) = win_for_event.current_monitor() {
+                    let max_h = m.size().height as f64 - 24.0;
+                    if let Ok(cur) = win_for_event.outer_size() {
+                        let cur_h_logical = cur.height as f64 / scale;
+                        if cur_h_logical > max_h {
+                            let w_logical = cur.width as f64 / scale;
+                            let _ = win_for_event.set_size(LogicalSize::new(w_logical, max_h));
+                        }
+                    }
+                }
             }
         });
 

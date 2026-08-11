@@ -542,17 +542,13 @@ async function init() {
   // 每分钟兜底刷新 + 窗口尺寸变化时图表自适应
   setInterval(() => { if (!$('onboarding').classList.contains('hidden')) return; refresh(); }, 60000);
   // 跨屏拖动/DPI 变化时 resize 会连续触发：防抖 + 延迟到尺寸稳定后再校准图表
+  // 注意：不要在这里解锁 autoResize——setSize 触发的 resize 会形成“重算→改尺寸→再 resize”死循环
   let resizeT = null;
   window.addEventListener('resize', () => {
     clearTimeout(resizeT);
     resizeT = setTimeout(() => {
       if (state.trendChart) state.trendChart.resize();
       if (state.heatmapChart) state.heatmapChart.resize();
-      // 跨屏（显示器高度不同）后重新适配窗口高度：
-      // 解锁启动时的高度锁定并重算，后端会 clamp 到新屏可用高度，
-      // 内容超高时窗口缩小、内部滚动保证底部完整可达
-      state.heightLocked = false;
-      autoResize();
     }, 50);
   });
 }
