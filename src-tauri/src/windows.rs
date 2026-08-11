@@ -11,6 +11,8 @@ use tauri::{
 
 const WIDGET_LABEL: &str = "widget";
 const SETTINGS_LABEL: &str = "settings";
+/// 小组件窗口设计宽度（逻辑像素），所有 setSize 恒用它，避免混合 DPI 下宽度漂移
+const WIDGET_WIDTH: f64 = 440.0;
 
 /// 是否支持 Win11 亚克力毛玻璃（build >= 22621）
 pub fn can_acrylic() -> bool {
@@ -114,13 +116,20 @@ impl WindowMgr {
                 cfg_store.save();
                 // 跨屏高度适配：新屏可用高度小于当前窗口高度时自动缩小
                 // （底部内容靠内部滚动可达；只缩不放，避免 resize 死循环）
+                // 全部用逻辑像素比较与设置；宽度恒为 WIDGET_WIDTH（混合 DPI 下不反推物理宽）
                 if let Ok(Some(m)) = win_for_event.current_monitor() {
-                    let max_h = m.size().height as f64 - 24.0;
+                    let max_h_logical = (m.size().height as f64 - 24.0) / scale;
                     if let Ok(cur) = win_for_event.outer_size() {
                         let cur_h_logical = cur.height as f64 / scale;
-                        if cur_h_logical > max_h {
-                            let w_logical = cur.width as f64 / scale;
-                            let _ = win_for_event.set_size(LogicalSize::new(w_logical, max_h));
+                        if cur_h_logical > max_h_logical {
+                            log::info!(
+                                "[win] 跨屏高度适配: cur_h={} max_h={} (逻辑px, scale={})",
+                                cur_h_logical,
+                                max_h_logical,
+                                scale
+                            );
+                            let _ = win_for_event
+                                .set_size(LogicalSize::new(WIDGET_WIDTH, max_h_logical));
                         }
                     }
                 }
@@ -151,19 +160,28 @@ impl WindowMgr {
     }
 
     /// 窗口高度自适应内容（上限为屏幕高度，对齐 resizeToContent）
+    /// 宽度恒为设计值 WIDGET_WIDTH（逻辑像素），不从物理尺寸反推——混合 DPI 下
+    /// outer_size 的物理宽会被 DPI 上下文污染导致宽度累积增长
     pub fn resize_to_content(&self, height: f64) {
         let Some(win) = self.widget() else { return };
         let Ok(scale) = win.scale_factor() else { return };
         let Ok(cur_phys) = win.outer_size() else { return };
-        let max = match win.current_monitor() {
-            Ok(Some(m)) => m.size().height as f64 - 24.0,
+        // 屏幕可用高度（转逻辑像素，与前端传入的 h 同单位）
+        let max_logical = match win.current_monitor() {
+            Ok(Some(m)) => (m.size().height as f64 - 24.0) / scale,
             _ => 700.0,
         };
-        let h = height.clamp(320.0, max);
-        let w_logical = cur_phys.width as f64 / scale;
+        let h = height.clamp(320.0, max_logical);
         let cur_h_logical = cur_phys.height as f64 / scale;
+        log::info!(
+            "[win] resize_to_content: h={} cur_h={} max={} scale={}",
+            h,
+            cur_h_logical,
+            max_logical,
+            scale
+        );
         if (cur_h_logical - h).abs() > 3.0 {
-            let _ = win.set_size(LogicalSize::new(w_logical, h));
+            let _ = win.set_size(LogicalSize::new(WIDGET_WIDTH, h));
         }
     }
 
