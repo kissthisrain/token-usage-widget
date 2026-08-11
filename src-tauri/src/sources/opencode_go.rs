@@ -435,9 +435,11 @@ fn urlencoding_encode(s: &str) -> String {
     out
 }
 
-/// 设置界面测试：已配置官方查询 → 真实抓取；否则给出代理配置说明
+/// 设置界面测试：官方额度源 → 真实抓取；代理源 → 配置说明（旧合并类型按字段判断兼容）
 pub async fn test(source: &SourceConfig, _history: &HistoryStore) -> serde_json::Value {
-    let official = source.workspace_id.is_some() && source.auth_cookie.is_some();
+    let official = source.type_ == "opencode-go-official"
+        || source.type_ == "opencode-go"
+        || (source.workspace_id.is_some() && source.auth_cookie.is_some());
     if official {
         let r = probe_quota(source).await;
         if r.ok {

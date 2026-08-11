@@ -97,20 +97,11 @@ pub fn build_snapshot(config: &ConfigStore, history: &HistoryStore, range: &str,
         })
         .collect();
 
-    // opencode-go 配额：
-    // - 配置官方查询（工作区 ID + Cookie）→ 用缓存的官方数据（权威），缓存缺失/无数据且无错误时本地估算兜底
-    // - 未配置 → 每次快照本地动态计算
+    // 配额：
+    // - opencode-go-proxy（本地代理）：每次快照动态计算本地估算（基于代理记录的历史）
+    // - opencode-go-official（官方额度）：数据由 scheduler 官方抓取写入缓存，这里不兜底
     for s in &enabled {
-        if s.type_ != "opencode-go" {
-            continue;
-        }
-        let q = history.data().quota.get(&s.id).cloned();
-        let needs_local = match &q {
-            None => true,
-            Some(qi) => qi.items.is_empty() && qi.error.is_none(),
-        };
-        let is_official_configured = s.workspace_id.is_some() && s.auth_cookie.is_some();
-        if !is_official_configured || needs_local {
+        if s.type_ == "opencode-go-proxy" {
             history.set_quota(&s.id, compute_quota(history, s));
         }
     }

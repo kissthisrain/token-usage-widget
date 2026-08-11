@@ -165,10 +165,12 @@ impl ConfigStore {
         let loaded: Option<Config> = std::fs::read_to_string(&self.file)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok());
-        let cfg = loaded.unwrap_or_default();
+        let mut cfg = loaded.unwrap_or_default();
         let empty_sources = cfg.sources.is_empty();
+        // 一次性迁移：旧「opencode-go」单类型拆分为「官方额度 + 本地代理」两个独立源
+        let migrated = migrate_opencode_go_split(&mut cfg);
         *self.data.lock().unwrap() = cfg.clone();
-        if empty_sources {
+        if empty_sources || migrated {
             self.save();
         }
         cfg
@@ -241,6 +243,39 @@ impl ConfigStore {
     pub fn sources_by_type(&self, ty: &str) -> Vec<SourceConfig> {
         self.get_sources(false).into_iter().filter(|s| s.type_ == ty).collect()
     }
+}
+
+/// 迁移：旧「opencode-go」单类型拆分为两个独立源：
+/// - opencode-go-proxy（本地代理）：保留原 id（历史消耗记录归属它，零丢失）
+/// - opencode-go-official（官方额度）：生成新 id（配额数据本就独立挂载）
+pub fn migrate_opencode_go_split(cfg: &mut Config) -> bool {
+    let mut changed = false;
+    let mut new_sources: Vec<SourceConfig> = Vec::with_capacity(cfg.sources.len() + 1);
+    for s in cfg.sources.drain(..) {
+        if s.type_ != "opencode-go" {
+            new_sources.push(s);
+            continue;
+        }
+        changed = true;
+        // 代理部分：保留原 id 与代理相关字段
+        let mut proxy = s.clone();
+        proxy.type_ = "opencode-go-proxy".to_string();
+        proxy.workspace_id = None;
+        proxy.auth_cookie = None;
+        new_sources.push(proxy);
+        // 官方部分：新 id，仅当原配置了官方字段
+        if s.workspace_id.is_some() || s.auth_cookie.is_some() {
+            let mut official = s.clone();
+            official.id = format!("{}_official", s.id);
+            official.type_ = "opencode-go-official".to_string();
+            official.port = None;
+            official.base_url = None;
+            official.price_map = None;
+            new_sources.push(official);
+        }
+    }
+    cfg.sources = new_sources;
+    changed
 }
 
 fn now_b36() -> String {

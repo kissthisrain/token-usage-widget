@@ -94,7 +94,7 @@ pub fn run() {
                         config
                             .get_sources(false)
                             .into_iter()
-                            .find(|s| s.type_ == "opencode-go")
+                            .find(|s| s.type_ == "opencode-go-proxy")
                     })
                 },
                 history_store.clone(),

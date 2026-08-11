@@ -14,7 +14,8 @@ const TYPE_META = {
   'local-logs': { icon: '📁', label: '本地记录' },
   'openai': { icon: '🔷', label: 'OpenAI 官方' },
   'compat': { icon: '🔀', label: '兼容中转站' },
-  'opencode-go': { icon: '⚡', label: 'OpenCode Go' },
+  'opencode-go-official': { icon: '⚡', label: 'Go 官方额度' },
+  'opencode-go-proxy': { icon: '🔌', label: 'Go 本地代理' },
 };
 
 const DEFAULTS = {
@@ -30,9 +31,12 @@ const DEFAULTS = {
     name: '兼容中转站', baseUrl: '', apiKey: '', balanceMode: 'auto',
     customBalanceUrl: '', modelWhitelist: '',
   },
-  'opencode-go': {
-    name: 'OpenCode Go', baseUrl: 'https://opencode.ai/zen/go', port: 12345,
-    priceMap: {}, workspaceId: '', authCookie: '', modelWhitelist: '',
+  'opencode-go-official': {
+    name: 'OpenCode Go 官方额度', workspaceId: '', authCookie: '', modelWhitelist: '',
+  },
+  'opencode-go-proxy': {
+    name: 'OpenCode Go 本地代理', baseUrl: 'https://opencode.ai/zen/go', port: 12345,
+    priceMap: {}, modelWhitelist: '',
   },
 };
 
@@ -113,14 +117,18 @@ function renderEditor() {
         <label>自定义余额接口 URL</label><input id="e-customurl" value="${U.esc(s.customBalanceUrl || '')}" placeholder="GET 请求，返回 JSON" />
         <div class="hint">返回的 JSON 中需包含：total_usage / balance_infos / usage+limit / quota 等可识别字段</div>
       </div>`;
-  } else if (s.type === 'opencode-go') {
+  } else if (s.type === 'opencode-go-official' || s.type === 'opencode-go') {
+    // 官方额度源：只查 opencode.ai 控制台（workspaceId + Cookie）
     body = `
       <div class="field"><label>工作区 ID（wrk_…）</label><input id="e-workspaceid" value="${U.esc(s.workspaceId || '')}" placeholder="控制台 URL 中 /workspace/{id}/go 的 id" />
         <div class="hint">获取：浏览器登录 opencode.ai → 打开用量控制台 → 地址栏复制 wrk_ 开头的 ID</div>
       </div>
       <div class="field"><label>Auth Cookie（登录态，仅本地保存）</label><input id="e-authcookie" type="password" value="${U.esc(s.authCookie || '')}" placeholder="浏览器 Cookie 中 auth 的值" />
-        <div class="hint">获取：控制台页面按 F12 → Application/存储 → Cookies → opencode.ai → 复制 auth 的值。<b>Cookie 等同登录态，请勿外传</b>；填写后剩余用量以官方控制台为准（权威），未填写或失效时回退本地代理估算</div>
-      </div>
+        <div class="hint">获取：控制台页面按 F12 → Application/存储 → Cookies → opencode.ai → 复制 auth 的值。<b>Cookie 等同登录态，请勿外传</b>；数据为官方权威（包含所有设备）</div>
+      </div>`;
+  } else if (s.type === 'opencode-go-proxy') {
+    // 本地代理源：记录本机请求消耗（估算）
+    body = `
       <div class="field"><label>代理端口</label><input id="e-port" type="number" value="${U.esc(s.port || 12345)}" /></div>
       <div class="field"><label>上游 Base URL</label><input id="e-baseurl" value="${U.esc(s.baseUrl || 'https://opencode.ai/zen/go')}" /></div>
       <div class="field"><label>模型价目表（每 1M token 美元，格式：模型: 输入价/输出价）</label>
@@ -259,8 +267,8 @@ function bindEditor(s) {
     else setStatus('✗ ' + (r.error || '连接失败'), 'err');
   });
 
-  // opencode-go 代理
-  if (s.type === 'opencode-go') refreshProxy();
+  // opencode-go 本地代理源：显示代理状态控件
+  if (s.type === 'opencode-go-proxy') refreshProxy();
 }
 
 async function refreshProxy() {

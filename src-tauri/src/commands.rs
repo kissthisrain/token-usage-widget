@@ -71,7 +71,9 @@ pub async fn test_source(
     let r = match cfg.type_.as_str() {
         "openai" => openai::test(&cfg).await,
         "compat" => compat::test(&cfg).await,
-        "opencode-go" => opencode_go::test(&cfg, &state.history).await,
+        "opencode-go-official" | "opencode-go-proxy" | "opencode-go" => {
+            opencode_go::test(&cfg, &state.history).await
+        }
         "local-logs" => {
             let p = cfg.path.clone().unwrap_or_default();
             let ok = !p.is_empty() && std::path::Path::new(&p).exists();

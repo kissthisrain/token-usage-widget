@@ -236,8 +236,9 @@ impl SchedulerFork {
                 );
                 Ok(())
             }
-            // opencode-go：配置了工作区 ID + Cookie → 官方用量抓取（未配置走 snapshot 本地估算）
-            "opencode-go" if src.workspace_id.is_some() && src.auth_cookie.is_some() => {
+            // opencode-go 官方额度源：周期抓取官方用量（未配置 Cookie 时给出错误提示；
+            // 本地代理源的估算配额由 snapshot 动态计算，不在此处理）
+            "opencode-go-official" => {
                 let r = crate::sources::opencode_go::probe_quota(src).await;
                 if r.ok {
                     this.history.set_quota(
