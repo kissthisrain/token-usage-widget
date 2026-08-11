@@ -2,14 +2,13 @@
 
 玻璃拟态深色风格的桌面悬浮小组件，**实时**展示本机 AI 工具的 token 消耗、额度剩余、使用趋势与活跃天数。
 
-> 本分支为 Rust + Tauri 重写版（v0.1.0）。原 Electron 版位于 `main` 分支。
-
 ## 功能
 
 - **实时总量**：TOTAL TOKENS 大数字带滚动动画，每次 AI 请求完成立即跳动
 - **费用**：总费用（USD），支持按模型价目表折算
 - **额度剩余**：各数据源剩余百分比进度条 + 重置倒计时
-  - OpenCode Go：5 小时 $12 / 每周 $30 / 每月 $60（官方限额，美元计，本地估算）
+  - OpenCode Go 官方额度：5 小时 $12 / 每周 $30 / 每月 $60（权威，含所有设备）
+  - OpenCode Go 本地代理：基于本机代理记录估算剩余%
   - Codex：本地会话记录中的周配额（used_percent + resets_at）
   - 兼容中转站：余额接口自动探测（billing / balance / auth-key / one-api 四种风格）
 - **模型明细**：按模型分组的 token 消耗与占比进度条
@@ -17,16 +16,15 @@
 - **活动**：GitHub 风格热力图 + 活跃天数
 - **时间筛选**：DAY / MONTH / TOTAL 三档
 
-## 数据源（4 类）
+## 数据源（5 类）
 
 | 类型 | 配置 | 说明 |
 |---|---|---|
 | **本地记录** | 自动探测（零配置） | 实时监听 ZCode（`~/.zcode/cli/rollout/model-io-*.jsonl`）与 Codex（`~/.codex/sessions/**/rollout-*.jsonl`）会话日志，毫秒级推送。ZCode 实时日志只保留当天，**历史用量自动从 `~/.zcode/cli/db/db.sqlite` 的 model_usage 表回填**（只读，按天去重，热力图/趋势立刻有 30 天数据） |
 | **OpenAI 官方** | Base URL + API Key | 用量 API（`/v1/usage`），需**组织管理员** Key；支持回填 90 天历史 |
 | **兼容中转站** | Base URL + API Key | 自动探测常见余额接口，或自定义 URL + 字段映射 |
-| **OpenCode Go** | 本地代理（端口） | 客户端指向 `http://127.0.0.1:<端口>`，代理转发到 `opencode.ai/zen/go` 并记录每次请求，对照官方限额计算剩余% |
-
-> ⏳ 二期状态：本地代理（SSE 流式转发）与 OpenCode Go 官方用量抓取已实现（v0.1.0 全功能）。
+| **OpenCode Go 本地代理** | 代理端口 + 上游 URL | 客户端指向 `http://127.0.0.1:<端口>`，代理转发到 `opencode.ai/zen/go` 并记录每次请求（估算，仅统计本机），对照官方限额计算剩余% |
+| **OpenCode Go 官方额度** | 工作区 ID + Auth Cookie | 抓取 opencode.ai 控制台内嵌数据（**权威**，包含所有设备），5 小时 / 每周 / 每月剩余用量 |
 
 ## 环境要求
 
