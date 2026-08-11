@@ -1,0 +1,45 @@
+# 自动构建 Windows 可执行文件（绿色版，非安装包）
+# 触发：push 到 main / rewrite-* 分支，或手动运行（Actions 页面 Run workflow）
+# 产物：token-usage-widget.exe（前端资源已嵌入，双击即可运行，依赖系统 WebView2）
+
+name: Build Windows exe
+
+on:
+  push:
+    branches:
+      - main
+      - "rewrite/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable, MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build release exe
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml
+
+      - name: Upload exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: token-usage-widget-windows-x64
+          path: src-tauri/target/release/token-usage-widget.exe
+          if-no-files-found: error
