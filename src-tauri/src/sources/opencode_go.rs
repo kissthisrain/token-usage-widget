@@ -200,6 +200,24 @@ fn clamp_pct(p: f64) -> Option<f64> {
     Some(p.clamp(0.0, 100.0))
 }
 
+// 控制台页面解析用正则（编译一次复用）
+static RE_USAGE_PCT: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"usagePercent["']?\s*[:=]\s*["']?([\d.]+)"#).unwrap());
+static RE_RESET_SEC: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"resetInSec["']?\s*[:=]\s*["']?(\d+)"#).unwrap());
+static RE_SLOT_LABEL: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"data-slot="usage-label">([^<]*)"#).unwrap());
+static RE_SLOT_VALUE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"data-slot="usage-value">([^<]*)"#).unwrap());
+static RE_SLOT_RESET: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r#"data-slot="reset-time">([^<]*)"#).unwrap());
+static RE_ROLLING: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)rolling|5\s*hour|滚动|5\s*小时").unwrap());
+static RE_WEEKLY: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)weekly|week|每周").unwrap());
+static RE_MONTHLY: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"(?i)monthly|month|每月").unwrap());
+
 /// 从控制台页面 HTML 提取三个窗口的用量百分比与重置时间
 /// 两种内嵌格式：
 ///  1) SSR 水合 JSON：rollingUsage:$R[n]={usagePercent:23.5,resetInSec:13320}
@@ -210,14 +228,12 @@ fn extract_usage(html: &str) -> std::collections::HashMap<String, UsageWin> {
     for (name, key) in SSR_NAMES {
         let Some(idx) = text.find(name) else { continue };
         let seg = &text[idx..(idx + 400).min(text.len())];
-        let pct = regex::Regex::new(r#"usagePercent["']?\s*[:=]\s*["']?([\d.]+)"#)
-            .ok()
-            .and_then(|re| re.captures(seg))
+        let pct = RE_USAGE_PCT
+            .captures(seg)
             .and_then(|c| c[1].parse::<f64>().ok())
             .and_then(clamp_pct);
-        let sec = regex::Regex::new(r#"resetInSec["']?\s*[:=]\s*["']?(\d+)"#)
-            .ok()
-            .and_then(|re| re.captures(seg))
+        let sec = RE_RESET_SEC
+            .captures(seg)
             .and_then(|c| c[1].parse::<i64>().ok());
         if let Some(p) = pct {
             out.insert(
@@ -235,19 +251,16 @@ fn extract_usage(html: &str) -> std::collections::HashMap<String, UsageWin> {
             .split("data-slot=\"usage-item\"")
             .skip(1)
             .map(|b| {
-                let label = regex::Regex::new(r#"data-slot="usage-label">([^<]*)"#)
-                    .ok()
-                    .and_then(|re| re.captures(b))
+                let label = RE_SLOT_LABEL
+                    .captures(b)
                     .map(|c| c[1].to_string())
                     .unwrap_or_default();
-                let value = regex::Regex::new(r#"data-slot="usage-value">([^<]*)"#)
-                    .ok()
-                    .and_then(|re| re.captures(b))
+                let value = RE_SLOT_VALUE
+                    .captures(b)
                     .map(|c| c[1].to_string())
                     .unwrap_or_default();
-                let reset = regex::Regex::new(r#"data-slot="reset-time">([^<]*)"#)
-                    .ok()
-                    .and_then(|re| re.captures(b))
+                let reset = RE_SLOT_RESET
+                    .captures(b)
                     .map(|c| c[1].to_string())
                     .or_else(|| {
                         if b.contains("data-slot=\"reset-now\"") {
@@ -261,36 +274,23 @@ fn extract_usage(html: &str) -> std::collections::HashMap<String, UsageWin> {
             })
             .filter(|(_, value, _)| value.parse::<f64>().ok().and_then(clamp_pct).is_some())
             .collect();
-        let mut order = 0usize;
-        for (label, value, reset) in slots {
-            let by_label = if regex::Regex::new(r"(?i)rolling|5\s*hour|滚动|5\s*小时")
-                .map(|re| re.is_match(&label))
-                .unwrap_or(false)
-            {
+        for (order, (label, value, reset)) in slots.into_iter().enumerate() {
+            let by_label = if RE_ROLLING.is_match(&label) {
                 Some("5h")
-            } else if regex::Regex::new(r"(?i)weekly|week|每周")
-                .map(|re| re.is_match(&label))
-                .unwrap_or(false)
-            {
+            } else if RE_WEEKLY.is_match(&label) {
                 Some("week")
-            } else if regex::Regex::new(r"(?i)monthly|month|每月")
-                .map(|re| re.is_match(&label))
-                .unwrap_or(false)
-            {
+            } else if RE_MONTHLY.is_match(&label) {
                 Some("month")
             } else {
                 None
             };
-            let key = by_label
-                .map(|s| s.to_string())
-                .or_else(|| {
-                    if order < SSR_NAMES.len() {
-                        Some(SSR_NAMES[order].1.to_string())
-                    } else {
-                        None
-                    }
-                });
-            order += 1;
+            let key = by_label.map(|s| s.to_string()).or_else(|| {
+                if order < SSR_NAMES.len() {
+                    Some(SSR_NAMES[order].1.to_string())
+                } else {
+                    None
+                }
+            });
             let Some(key) = key else { continue };
             if out.contains_key(&key) {
                 continue;
@@ -380,7 +380,7 @@ pub async fn probe_quota(source: &SourceConfig) -> ProbeQuotaResult {
         };
     }
     let usage = extract_usage(&res.body_text);
-    if usage.get("5h").is_none() && usage.get("week").is_none() && usage.get("month").is_none() {
+    if !usage.contains_key("5h") && !usage.contains_key("week") && !usage.contains_key("month") {
         return ProbeQuotaResult {
             ok: false,
             error: Some("页面已返回但未解析到用量数据（页面结构可能已变更）".to_string()),

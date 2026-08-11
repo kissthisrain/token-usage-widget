@@ -28,7 +28,7 @@ use tauri::Emitter;
 type ProxyBody = UnsyncBoxBody<Bytes, io::Error>;
 
 fn full_bytes(b: Bytes) -> ProxyBody {
-    UnsyncBoxBody::new(Full::new(b).map_err(|e| io::Error::new(io::ErrorKind::Other, e)))
+    UnsyncBoxBody::new(Full::new(b).map_err(io::Error::other))
 }
 
 fn stream_body<S>(s: S) -> ProxyBody
@@ -255,7 +255,7 @@ impl GoProxyInner {
                 if let Ok(c) = &chunk {
                     this.parse_stream_chunk(c, model.as_deref());
                 }
-                chunk.map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+                chunk.map_err(|e| io::Error::other(e.to_string()))
             });
             Ok(builder
                 .body(stream_body(stream))
@@ -334,7 +334,7 @@ impl GoProxyInner {
         };
         let input = num(&["input_tokens", "inputTokens", "prompt_tokens"]);
         let output = num(&["output_tokens", "outputTokens", "completion_tokens"]);
-        let total = num(&["total_tokens", "totalTokens"]).or_else(|| match (input, output) {
+        let total = num(&["total_tokens", "totalTokens"]).or(match (input, output) {
             (Some(i), Some(o)) => Some(i + o),
             _ => None,
         });
