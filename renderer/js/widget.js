@@ -548,6 +548,11 @@ async function init() {
     resizeT = setTimeout(() => {
       if (state.trendChart) state.trendChart.resize();
       if (state.heatmapChart) state.heatmapChart.resize();
+      // 跨屏（显示器高度不同）后重新适配窗口高度：
+      // 解锁启动时的高度锁定并重算，后端会 clamp 到新屏可用高度，
+      // 内容超高时窗口缩小、内部滚动保证底部完整可达
+      state.heightLocked = false;
+      autoResize();
     }, 50);
   });
 }
