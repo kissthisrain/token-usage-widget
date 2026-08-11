@@ -246,6 +246,10 @@ function renderTrend(trend) {
   const dates = trend.map((t) => t.date);
   const tokens = trend.map((t) => t.tokens);
   const chart = state.trendChart || (state.trendChart = echarts.init(el));
+  // 容器刚从隐藏恢复或跨屏 DPI 变化后，初始化读到的尺寸可能未就绪：
+  // 强制按当前实际尺寸重算，再等布局稳定后校准一次（避免图表被横向挤压）
+  chart.resize();
+  setTimeout(() => chart.resize(), 50);
   const len = dates.length;
   // 峰值位于右缘（末三位）时，标注文字向左偏移，避免溢出画布
   const maxVal = Math.max(...tokens);
@@ -537,9 +541,14 @@ async function init() {
 
   // 每分钟兜底刷新 + 窗口尺寸变化时图表自适应
   setInterval(() => { if (!$('onboarding').classList.contains('hidden')) return; refresh(); }, 60000);
+  // 跨屏拖动/DPI 变化时 resize 会连续触发：防抖 + 延迟到尺寸稳定后再校准图表
+  let resizeT = null;
   window.addEventListener('resize', () => {
-    if (state.trendChart) state.trendChart.resize();
-    if (state.heatmapChart) state.heatmapChart.resize();
+    clearTimeout(resizeT);
+    resizeT = setTimeout(() => {
+      if (state.trendChart) state.trendChart.resize();
+      if (state.heatmapChart) state.heatmapChart.resize();
+    }, 50);
   });
 }
 
