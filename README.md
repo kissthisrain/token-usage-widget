@@ -82,12 +82,35 @@ OpenCode Go **没有公开的用量 JSON API**（`/v1/usage`、`/v1/balance` 均
 
 ## 开发命令
 
+### 日常迭代（快速，推荐）
+
 ```bash
-npm run dev            # 开发模式
-cargo clippy           # lint
+npm run dev                       # 开发模式：前端改动保存后窗口自动热重载（秒级）
+                                  # Rust 代码改动后 Ctrl+C 重跑即可（增量编译，10~60s）
+
+cd src-tauri && cargo build       # 只改 Rust 时：增量编译（比 release 快得多）
+./target/debug/token-usage-widget.exe   # 运行最新 debug 版看效果
+
+./target/debug/token-usage-widget.exe --smoke   # 无界面数据管道自检（秒级）
+```
+
+### 发布（慢，仅打包时用）
+
+```bash
+npm run build                     # tauri build：release 全量优化编译 + NSIS 打包
+                                  # 首次 10-25 分钟，之后增量也要几分钟；产物在
+                                  # src-tauri/target/release/bundle/
+```
+
+### 质量与工具
+
+```bash
+cargo clippy           # lint（保持 0 警告）
 cargo test             # 单元测试
 npm run icon           # 重新生成应用图标（resources/icon-1024.png → src-tauri/icons/）
 ```
+
+> 💡 日常开发永远走 `cargo build` + debug exe（或 `npm run dev`）；`npm run build` 是发布流程（release 优化 + 打安装包），不适合用来验证改动。
 
 ## 数据与隐私
 
