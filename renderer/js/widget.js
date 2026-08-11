@@ -243,13 +243,14 @@ function renderCharts(s) {
 
 function renderTrend(trend) {
   const el = $('trendChart');
+  const doRender = () => {
+    const chart = state.trendChart || (state.trendChart = echarts.init(el));
+    // 容器刚从隐藏恢复或跨屏 DPI 变化后，初始化读到的尺寸可能未就绪：
+    // 强制按当前实际尺寸重算，再等布局稳定后校准一次（避免图表被横向挤压）
+    chart.resize();
+    setTimeout(() => chart.resize(), 80);
   const dates = trend.map((t) => t.date);
   const tokens = trend.map((t) => t.tokens);
-  const chart = state.trendChart || (state.trendChart = echarts.init(el));
-  // 容器刚从隐藏恢复或跨屏 DPI 变化后，初始化读到的尺寸可能未就绪：
-  // 强制按当前实际尺寸重算，再等布局稳定后校准一次（避免图表被横向挤压）
-  chart.resize();
-  setTimeout(() => chart.resize(), 50);
   const len = dates.length;
   // 峰值位于右缘（末三位）时，标注文字向左偏移，避免溢出画布
   const maxVal = Math.max(...tokens);
@@ -321,7 +322,15 @@ function renderTrend(trend) {
       },
     ],
   });
-  window.__trendChart = chart; // 调试转储用
+    window.__trendChart = chart; // 调试转储用
+  };
+  if (state.trendChart) {
+    doRender();
+  } else {
+    // 容器刚从隐藏恢复/跨屏后，浏览器布局可能未完成：
+    // 双 rAF 后再 init，确保拿到正确的容器宽度（避免图表被横向挤压）
+    requestAnimationFrame(() => requestAnimationFrame(doRender));
+  }
 }
 
 function renderHeatmap(heatmap) {
