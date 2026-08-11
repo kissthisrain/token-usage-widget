@@ -1,14 +1,13 @@
 # 自动构建 Windows 可执行文件（绿色版，非安装包）
-# 触发：push 到 main / rewrite-* 分支，或手动运行（Actions 页面 Run workflow）
+# 触发：打 v* 开头的 tag（如 v0.1.0），或手动运行（Actions 页面 Run workflow）
 # 产物：token-usage-widget.exe（前端资源已嵌入，双击即可运行，依赖系统 WebView2）
 
 name: Build Windows exe
 
 on:
   push:
-    branches:
-      - main
-      - "rewrite/**"
+    tags:
+      - "v*"
   workflow_dispatch:
 
 jobs:
