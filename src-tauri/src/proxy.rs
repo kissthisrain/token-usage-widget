@@ -23,7 +23,15 @@ use serde_json::Value;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::Emitter;
+
+/// 请求体上限（防本地进程灌入超大请求）
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// 上游请求总超时（含流式读取；SSE 长连接有数据即续期）
+const UPSTREAM_TIMEOUT: Duration = Duration::from_secs(60);
+/// 本应用 webview 的受信 Origin（CSP connect-src 之外的浏览器来源一律拒绝）
+const TRUSTED_ORIGINS: [&str; 3] = ["tauri://localhost", "http://ipc.localhost", "https://tauri.localhost"];
 
 type ProxyBody = UnsyncBoxBody<Bytes, io::Error>;
 
@@ -46,6 +54,56 @@ fn json_response(status: StatusCode, body: &str) -> Response<ProxyBody> {
         .unwrap_or_else(|_| Response::new(full_bytes(Bytes::new())))
 }
 
+/// 认证判定（独立函数便于单测）：token 必须匹配，且带 Origin 时必须是受信来源
+fn auth_ok(token: &str, parts: &hyper::http::request::Parts) -> bool {
+    if let Some(origin) = parts.headers.get("origin").and_then(|v| v.to_str().ok()) {
+        if !origin.is_empty() && !TRUSTED_ORIGINS.contains(&origin) {
+            return false;
+        }
+    }
+    let tok = parts
+        .headers
+        .get("x-proxy-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    tok == token
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::http::Request;
+
+    fn parts_with(headers: &[(&str, &str)]) -> hyper::http::request::Parts {
+        let mut req = Request::builder().uri("/v1/chat/completions");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn proxy_auth_requires_token() {
+        assert!(!auth_ok("secret", &parts_with(&[])), "无 token 应拒绝");
+        assert!(!auth_ok("secret", &parts_with(&[("x-proxy-token", "wrong")])), "错误 token 应拒绝");
+        assert!(auth_ok("secret", &parts_with(&[("x-proxy-token", "secret")])), "正确 token 应通过");
+    }
+
+    #[test]
+    fn proxy_auth_rejects_untrusted_origin() {
+        // 恶意网页：即使带正确 token，非受信 Origin 也拒绝
+        assert!(!auth_ok("secret", &parts_with(&[
+            ("x-proxy-token", "secret"),
+            ("origin", "http://evil.com"),
+        ])));
+        // 本应用 webview 的 Origin 允许
+        assert!(auth_ok("secret", &parts_with(&[
+            ("x-proxy-token", "secret"),
+            ("origin", "http://ipc.localhost"),
+        ])));
+    }
+}
+
 pub struct GoProxy {
     inner: Arc<GoProxyInner>,
 }
@@ -56,6 +114,24 @@ struct GoProxyInner {
     app: tauri::AppHandle,
     running: AtomicBool,
     task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// 启动时随机生成的认证 token（客户端须带 X-Proxy-Token 头）
+    token: Mutex<String>,
+}
+
+/// 随机 32 位 base36 token（防本地进程/浏览器页面滥用代理）
+fn gen_token() -> String {
+    use rand::Rng;
+    let mut rng = rand::thread_rng();
+    (0..32)
+        .map(|_| {
+            let c = rng.gen_range(0..36);
+            if c < 10 {
+                (b'0' + c as u8) as char
+            } else {
+                (b'a' + (c - 10) as u8) as char
+            }
+        })
+        .collect()
 }
 
 impl GoProxy {
@@ -71,6 +147,7 @@ impl GoProxy {
                 app,
                 running: AtomicBool::new(false),
                 task: Mutex::new(None),
+                token: Mutex::new(gen_token()),
             }),
         }
     }
@@ -91,11 +168,13 @@ impl GoProxy {
         self.inner.running.load(Ordering::SeqCst)
     }
 
-    /// 启动本地代理（幂等）
+    /// 启动本地代理（幂等）；每次启动轮换认证 token
     pub async fn start(&self) -> bool {
         if self.is_running() {
             return true;
         }
+        // 每次启动轮换 token，旧客户端配置即刻失效
+        *self.inner.token.lock().unwrap() = gen_token();
         let port = self.port();
         let inner = self.inner.clone();
         let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
@@ -142,17 +221,29 @@ impl GoProxy {
 
     pub fn status(&self) -> serde_json::Value {
         let port = self.port();
+        let token = self.inner.token();
         serde_json::json!({
             "running": self.is_running(),
             "port": port,
             "host": "127.0.0.1",
             "baseUrl": self.base_url(),
-            "hint": format!("将客户端的 API Base URL 设置为 http://127.0.0.1:{port}（保留 /v1 路径）"),
+            "token": token,
+            "hint": format!("将客户端的 API Base URL 设置为 http://127.0.0.1:{port}，并在请求头添加 X-Proxy-Token: {token}（保留 /v1 路径；每次重启代理会轮换 token）"),
         })
     }
 }
 
 impl GoProxyInner {
+    fn token(&self) -> String {
+        self.token.lock().unwrap().clone()
+    }
+
+    /// 代理防滥用校验：
+    /// - 所有请求必须带 X-Proxy-Token（随机生成，启动时轮换）
+    /// - 浏览器来源（带 Origin）必须是本应用 webview，防恶意网页驱动代理产生费用
+    fn auth_ok(&self, parts: &hyper::http::request::Parts) -> bool {
+        auth_ok(&self.token(), parts)
+    }
     fn source(&self) -> Option<SourceConfig> {
         (self.get_source)()
     }
@@ -175,16 +266,38 @@ impl GoProxyInner {
     /// 处理单个代理请求（对齐 main/proxy.js 的 handle）
     async fn handle(self: Arc<Self>, req: Request<Incoming>) -> Result<Response<ProxyBody>, io::Error> {
         let (parts, body) = req.into_parts();
-        // 缓冲请求体
-        let body_bytes = match body.collect().await {
-            Ok(b) => b.to_bytes(),
-            Err(_) => {
-                return Ok(json_response(
-                    StatusCode::BAD_REQUEST,
-                    r#"{"error":{"message":"读取请求体失败"}}"#,
-                ))
+        // 防滥用认证：token + 受信 Origin
+        if !self.auth_ok(&parts) {
+            return Ok(json_response(
+                StatusCode::FORBIDDEN,
+                r#"{"error":{"message":"代理需要 X-Proxy-Token 认证（见设置 → 本地代理）"}}"#,
+            ));
+        }
+        // 缓冲请求体（流式累计，上限 10MB；超限即拒绝，不整块缓冲）
+        let mut body_bytes: Vec<u8> = Vec::new();
+        let mut body = body;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(f) => {
+                    if let Ok(data) = f.into_data() {
+                        body_bytes.extend_from_slice(&data);
+                        if body_bytes.len() > MAX_BODY_BYTES {
+                            return Ok(json_response(
+                                StatusCode::PAYLOAD_TOO_LARGE,
+                                r#"{"error":{"message":"请求体超过 10MB 上限"}}"#,
+                            ));
+                        }
+                    }
+                }
+                Err(_) => {
+                    return Ok(json_response(
+                        StatusCode::BAD_REQUEST,
+                        r#"{"error":{"message":"读取请求体失败"}}"#,
+                    ))
+                }
             }
-        };
+        }
+        let body_bytes = Bytes::from(body_bytes);
         // 请求体里的 model（用于流式 chunk 无 model 字段时）
         let req_model = serde_json::from_str::<Value>(&String::from_utf8_lossy(&body_bytes))
             .ok()
@@ -202,10 +315,22 @@ impl GoProxyInner {
         let target_url = format!("{}{}", self.base_url(), path);
 
         // 构建上游请求：透传除 hop-by-hop 外的所有头（Authorization 保留）
-        let mut rb = reqwest::Client::builder()
+        // 上游超时 60s + 禁止自动重定向；构建失败直接报错（不回退默认 client，避免跟随重定向泄凭据）
+        let client = match reqwest::Client::builder()
+            .timeout(UPSTREAM_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new())
+        {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("[proxy] 构建上游 client 失败: {e}");
+                return Ok(json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    r#"{"error":{"message":"代理内部错误"}}"#,
+                ));
+            }
+        };
+        let mut rb = client
             .request(parts.method.clone(), &target_url)
             .body(body_bytes.to_vec());
         for (k, v) in parts.headers.iter() {
