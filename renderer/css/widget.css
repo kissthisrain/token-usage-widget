@@ -360,9 +360,9 @@
   flex-direction: column;          /* 竖条：状态点 + 垂直槽 */
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 10px 0;
-  border-radius: 16px;
+  gap: 6px;
+  padding: 8px 0;
+  border-radius: 28px;             /* 56 宽的一半：端部半圆，圆润药丸感 */
   background: rgba(18, 20, 30, 0.72);
   border: 1px solid rgba(255, 255, 255, 0.12);
   box-shadow: 0 6px 28px rgba(0, 0, 0, 0.4);
@@ -372,9 +372,9 @@
 }
 body.dock-h .dock-bar {            /* 横条（贴顶/底边）：状态点 + 水平槽 */
   flex-direction: row;
-  gap: 10px;
-  padding: 0 12px;
-  border-radius: 12px;
+  gap: 8px;
+  padding: 0 10px;
+  border-radius: 21px;             /* 42 高的一半：端部半圆 */
 }
 .dock-dot {
   width: 7px;

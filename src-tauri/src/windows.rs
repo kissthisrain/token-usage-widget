@@ -19,10 +19,11 @@ const DOCK_THRESHOLD: f64 = 40.0;
 /// （值取小，保证拖动时能快速识别并释放，避免"拖不动"）
 const DOCK_UNDOCK_DIST: f64 = 25.0;
 /// 贴边小条尺寸（逻辑px）：贴左右边 → 竖条；贴顶底边 → 横条
+/// 竖条 56x100 ≈ 1:1.8 紧凑比例（原 56x180 过修长）；横条相应压扁
 const DOCK_V_W: f64 = 56.0;
-const DOCK_V_H: f64 = 180.0;
-const DOCK_H_W: f64 = 170.0;
-const DOCK_H_H: f64 = 48.0;
+const DOCK_V_H: f64 = 100.0;
+const DOCK_H_W: f64 = 150.0;
+const DOCK_H_H: f64 = 42.0;
 /// 精简界面尺寸（逻辑px）
 const MINI_W: f64 = 190.0;
 const MINI_H: f64 = 280.0;
