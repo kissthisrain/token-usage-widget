@@ -131,8 +131,6 @@ pub fn run() {
             // 窗口
             win_mgr.create_widget();
             win_mgr.apply_opacity();
-            // 贴边收缩检测轮询
-            win_mgr.start_dock_watcher();
             // 调试：--open-settings 启动即打开设置窗口
             if std::env::args().any(|a| a == "--open-settings") {
                 win_mgr.open_settings();
@@ -184,7 +182,6 @@ pub fn run() {
             commands::win_close,
             commands::win_show_mini,
             commands::win_show_main,
-            commands::win_dock_again,
             commands::app_quit,
         ])
         .run(tauri::generate_context!())

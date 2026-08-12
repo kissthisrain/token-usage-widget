@@ -62,8 +62,7 @@ async function refresh() {
 function render() {
   const s = state.snapshot;
   if (!s) return;
-  // 贴边小条 / 精简界面：只更新对应视图，跳过完整界面渲染
-  if (view === 'bar') { renderDockBar(s); return; }
+  // 精简界面：只更新对应视图，跳过完整界面渲染
   if (view === 'mini') { renderMini(s); return; }
 
   // 通用显示设置（设置窗口开关即时生效）
@@ -476,13 +475,9 @@ async function enableSelectedTools() {
   $('main').classList.remove('hidden');
 }
 
-// ================= 贴边/精简视图（三态：bar 槽条 / mini 精简 / main 主界面） =================
+// ================= 精简视图（mini 精简 / main 主界面） =================
 
-let view = 'main';          // 'bar' | 'mini' | 'main'
-let miniFromDock = false;   // mini 是否从贴边展开（移出收回）
-let hoverExpand = false;    // 正在悬停展开（忽略 dockBar 隐藏时的 mouseleave）
-let dockCooldown = false;   // 收回后冷却，避免鼠标停在边缘反复展开
-let dockLeaveT = null;
+let view = 'main';          // 'mini' | 'main'
 
 /** 从快照取 opencode-go 某窗口（5h/week/month）的剩余% */
 function quotaItemPct(snap, key) {
@@ -490,28 +485,6 @@ function quotaItemPct(snap, key) {
   const it = q && (q.items || []).find((i) => i.key === key);
   if (!it || it.usedPct == null) return null;
   return Math.max(0, Math.min(100, 100 - it.usedPct));
-}
-
-/** 设置页指定的主指标剩余%（默认 Go 5h） */
-function dockMetricPct(snap) {
-  const metric = (state.g && state.g.dockMetric) || 'go-5h';
-  const key = metric === 'go-week' ? 'week' : metric === 'go-month' ? 'month' : '5h';
-  return quotaItemPct(snap, key);
-}
-
-/** 贴边小条（图一：槽越满=剩余越多） */
-function renderDockBar(snap) {
-  const pct = dockMetricPct(snap);
-  const fill = document.querySelector('.dock-fill');
-  const dot = document.querySelector('.dock-dot');
-  const horiz = document.body.classList.contains('dock-h');
-  if (pct == null) {
-    fill.style[horiz ? 'width' : 'height'] = '0%';
-    dot.classList.add('err');
-  } else {
-    fill.style[horiz ? 'width' : 'height'] = pct + '%';
-    dot.classList.remove('err');
-  }
 }
 
 /** 精简界面（图二：5h 大数字+环形进度，下方周/月剩余） */
@@ -546,26 +519,16 @@ function renderMini(snap) {
 
 /** app:dock 事件 → 切换视图 */
 function setView(d) {
-  view = d.view || (d.docked ? 'bar' : 'main');
-  miniFromDock = !!d.docked && view === 'mini';
-  document.body.classList.toggle('docked', !!d.docked);
-  document.body.classList.toggle('dock-h', !!d.docked && (d.edge === 'top' || d.edge === 'bottom'));
-  $('dockBar').classList.toggle('hidden', view !== 'bar');
+  view = d.view || 'main';
   $('miniView').classList.toggle('hidden', view !== 'mini');
   $('main').classList.toggle('hidden', view !== 'main');
-  if (view === 'bar') renderDockBar(state.snapshot);
   if (view === 'mini') renderMini(state.snapshot);
   if (view === 'main') {
-    // 从精简/贴边切回主界面：解锁高度锁定并按内容重新自适应
+    // 从精简切回主界面：解锁高度锁定并按内容重新自适应
     // （否则窗口高度残留精简界面的小尺寸）
     state.heightLocked = false;
     setTimeout(autoResize, 30);
   }
-}
-
-function cooldownDock() {
-  dockCooldown = true;
-  setTimeout(() => { dockCooldown = false; }, 800);
 }
 
 // ================= 初始化 =================
@@ -584,29 +547,9 @@ async function init() {
     applyCardOpacity();
   });
 
-  // 贴边/精简视图：Rust 端检测贴边后广播 app:dock {docked, view}
+  // 精简/主视图切换：Rust 端广播 app:dock {docked:false, view}
   api.onDock((d) => setView(d));
-  const dockBar = $('dockBar');
   const miniView = $('miniView');
-  // 贴边小条：悬停展开为精简界面
-  dockBar.addEventListener('mouseenter', () => {
-    if (dockCooldown) return;
-    clearTimeout(dockLeaveT);
-    hoverExpand = true;
-    api.showMini();
-  });
-  // 小条上移开（未展开时）→ 保持/收回
-  dockBar.addEventListener('mouseleave', () => {
-    if (hoverExpand) return; // 展开中，由 miniView 的 mouseleave 负责收回
-    clearTimeout(dockLeaveT);
-    dockLeaveT = setTimeout(() => { cooldownDock(); api.dockAgain(); }, 500);
-  });
-  // 精简界面：仅贴边展开态移出 → 收回小条（悬浮态不收回）
-  miniView.addEventListener('mouseleave', () => {
-    if (!miniFromDock) return;
-    clearTimeout(dockLeaveT);
-    dockLeaveT = setTimeout(() => { cooldownDock(); api.dockAgain(); }, 500);
-  });
   // 精简界面右键 → 切换为主界面（居中）
   miniView.addEventListener('contextmenu', (e) => {
     e.preventDefault();

@@ -245,12 +245,6 @@ pub async fn win_show_main(state: State<'_, AppState>) -> Result<OkResult, Strin
 }
 
 #[tauri::command]
-pub async fn win_dock_again(state: State<'_, AppState>) -> Result<OkResult, String> {
-    state.win_mgr.dock_again();
-    Ok(OkResult { ok: true, error: None, path: None })
-}
-
-#[tauri::command]
 pub async fn app_quit(app: AppHandle) -> Result<OkResult, String> {
     app.exit(0);
     Ok(OkResult { ok: true, error: None, path: None })

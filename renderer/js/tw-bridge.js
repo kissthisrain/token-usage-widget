@@ -21,7 +21,6 @@
     onDock: (cb) => subscribe('app:dock', cb),
     showMini: () => invoke('win_show_mini'),
     showMain: () => invoke('win_show_main'),
-    dockAgain: () => invoke('win_dock_again'),
     resizeWindow: (h) => invoke('win_resize', { h: Number(h) }),
     getPinned: () => invoke('win_get_pinned'),
     setPinned: (v) => invoke('win_set_pinned', { v: !!v }),
