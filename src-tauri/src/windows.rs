@@ -191,7 +191,27 @@ impl WindowMgr {
         });
 
         self.restore_on_screen(&win, bounds);
-        let _ = win.show();
+        // 不立即 show：等前端加载完成并自适应高度后，由 win_ready 通知显示
+        // （避免 WebView2 未就绪时窗口闪深色底框、以及高度从 700 撑到内容高度）
+        let app = self.app.clone();
+        tauri::async_runtime::spawn(async move {
+            // 兜底：前端加载失败/超时也要显示窗口（防窗口永不出现）
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            if let Some(w) = app.get_webview_window(WIDGET_LABEL) {
+                if !w.is_visible().unwrap_or(false) {
+                    let _ = w.show();
+                }
+            }
+        });
+    }
+
+    /// 前端就绪后显示窗口（首次加载完成后由 win_ready 调用）
+    pub fn show_ready(&self) {
+        if let Some(win) = self.widget() {
+            if !win.is_visible().unwrap_or(false) {
+                let _ = win.show();
+            }
+        }
     }
 
     fn restore_on_screen(&self, win: &WebviewWindow, bounds: Option<WindowBounds>) {

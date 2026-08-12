@@ -631,6 +631,10 @@ async function init() {
       if (state.heatmapChart) state.heatmapChart.resize();
     }, 50);
   });
+
+  // 首次加载：等 autoResize 完成高度自适应后，通知 Rust 显示窗口
+  // （避免首屏黑框闪烁、以及窗口从初始高度被内容撑开的跳变）
+  setTimeout(() => api.winReady(), 300);
 }
 
 init();

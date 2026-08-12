@@ -182,6 +182,7 @@ pub fn run() {
             commands::win_close,
             commands::win_show_mini,
             commands::win_show_main,
+            commands::win_ready,
             commands::app_quit,
         ])
         .run(tauri::generate_context!())

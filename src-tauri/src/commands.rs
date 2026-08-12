@@ -244,6 +244,13 @@ pub async fn win_show_main(state: State<'_, AppState>) -> Result<OkResult, Strin
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
+/// 前端加载完成并自适应高度后通知显示窗口（避免首屏黑框闪烁/高度撑开）
+#[tauri::command]
+pub async fn win_ready(state: State<'_, AppState>) -> Result<OkResult, String> {
+    state.win_mgr.show_ready();
+    Ok(OkResult { ok: true, error: None, path: None })
+}
+
 #[tauri::command]
 pub async fn app_quit(app: AppHandle) -> Result<OkResult, String> {
     app.exit(0);
