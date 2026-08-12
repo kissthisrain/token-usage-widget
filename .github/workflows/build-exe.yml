@@ -1,6 +1,7 @@
 # 自动构建 Windows 可执行文件（绿色版，非安装包）
 # 触发：打 v* 开头的 tag（如 v0.1.0），或手动运行（Actions 页面 Run workflow）
 # 产物：token-usage-widget.exe（前端资源已嵌入，双击即可运行，依赖系统 WebView2）
+# 发布：打 tag 时自动创建 GitHub Release 草稿，附上 exe，并自动汇总上次 tag 以来的 commit 标题作为发布说明
 
 name: Build Windows exe
 
@@ -9,6 +10,9 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -36,9 +40,9 @@ jobs:
       - name: Build release exe
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
-      - name: Upload exe artifact
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: token-usage-widget-windows-x64
-          path: src-tauri/target/release/token-usage-widget.exe
-          if-no-files-found: error
+          files: src-tauri/target/release/token-usage-widget.exe
+          generate_release_notes: true
+          draft: true
