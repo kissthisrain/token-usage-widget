@@ -555,6 +555,12 @@ function setView(d) {
   $('main').classList.toggle('hidden', view !== 'main');
   if (view === 'bar') renderDockBar(state.snapshot);
   if (view === 'mini') renderMini(state.snapshot);
+  if (view === 'main') {
+    // 从精简/贴边切回主界面：解锁高度锁定并按内容重新自适应
+    // （否则窗口高度残留精简界面的小尺寸）
+    state.heightLocked = false;
+    setTimeout(autoResize, 30);
+  }
 }
 
 function cooldownDock() {
@@ -565,6 +571,10 @@ function cooldownDock() {
 // ================= 初始化 =================
 
 async function init() {
+  // 禁用 WebView2 浏览器默认右键菜单（刷新/另存为/打印等）；
+  // miniView 自身的右键切回处理不受影响（其 handler 先执行）
+  document.addEventListener('contextmenu', (e) => e.preventDefault());
+
   // 毛玻璃模式（acrylic）时卡片更透明，让背景模糊透出来
   if (new URLSearchParams(location.search).get('acrylic') === '1') {
     document.body.classList.add('acrylic');
@@ -602,8 +612,6 @@ async function init() {
     e.preventDefault();
     api.showMain();
   });
-  // 主界面：精简视图切换按钮
-  $('miniBtn').addEventListener('click', () => api.showMini());
 
   state.config = await api.getConfig();
   const enabledCount = state.config.sources.filter((s) => s.enabled).length;

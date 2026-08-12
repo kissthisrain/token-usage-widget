@@ -377,9 +377,8 @@ impl WindowMgr {
             .inner_size(440.0, 700.0)
             .decorations(false)
             .transparent(true)
-            // 必须允许程序调整大小：mini/main 视图切换依赖 set_size，
-            // resizable(false) 下 SetWindowPos 调整尺寸会导致 WebView2 崩溃重载
-            .resizable(true)
+            // 固定大小（用户不可拖边框调整）；视图切换的 set_size 仍由程序控制
+            .resizable(false)
             .maximizable(false)
             .fullscreen(false)
             .skip_taskbar(true)
