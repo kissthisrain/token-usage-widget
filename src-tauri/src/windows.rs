@@ -46,6 +46,8 @@ pub struct WindowMgr {
     config: Arc<ConfigStore>,
     /// 当前视图：mini（精简界面）/ main（主界面）
     view: Mutex<String>,
+    /// 主视图位置（切到精简前保存，切回时恢复，避免窗口漂移）
+    main_pos: Mutex<Option<PhysicalPosition<i32>>>,
 }
 
 impl WindowMgr {
@@ -54,6 +56,7 @@ impl WindowMgr {
             app,
             config,
             view: Mutex::new("main".to_string()),
+            main_pos: Mutex::new(None),
         }
     }
 
@@ -66,7 +69,10 @@ impl WindowMgr {
         let Some(win) = self.widget() else { return };
         let Ok(scale) = win.scale_factor() else { return };
         let mini_size = PhysicalSize::new((MINI_W * scale) as u32, (MINI_H * scale) as u32);
-        // 悬浮精简界面：位置保持当前
+        // 保存主视图位置（切回时恢复）；悬浮精简界面位置保持当前
+        if let Ok(p) = win.outer_position() {
+            *self.main_pos.lock().unwrap() = Some(p);
+        }
         let _ = win.set_size(mini_size);
         *self.view.lock().unwrap() = "mini".to_string();
         let _ = self
@@ -84,20 +90,16 @@ impl WindowMgr {
         let cur_h = win.outer_size().map(|s| s.height as f64).unwrap_or(700.0 * scale);
         let (w, h) = (WIDGET_WIDTH * scale, cur_h);
         let _ = win.set_size(PhysicalSize::new(w, h));
+        // 恢复到切到精简前的主视图位置（避免切回时窗口漂移）
+        if let Some(p) = self.main_pos.lock().unwrap().take() {
+            let _ = win.set_position(p);
+        }
         let _ = win.set_always_on_top(cfg.always_on_top);
         *self.view.lock().unwrap() = "main".to_string();
-        // 当前屏幕居中
-        if let Ok(Some(m)) = win.current_monitor() {
-            let mpos = m.position();
-            let msize = m.size();
-            let cx = mpos.x + (msize.width as i32 - w as i32) / 2;
-            let cy = mpos.y + (msize.height as i32 - h as i32) / 2;
-            let _ = win.set_position(PhysicalPosition::new(cx, cy));
-        }
         let _ = self
             .app
             .emit("app:dock", serde_json::json!({ "docked": false, "view": "main" }));
-        log::info!("[win] 切换主界面(居中)");
+        log::info!("[win] 切换主界面");
     }
 
     /// 当前是否为精简界面
