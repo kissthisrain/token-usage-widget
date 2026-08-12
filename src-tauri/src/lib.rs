@@ -131,6 +131,8 @@ pub fn run() {
             // 窗口
             win_mgr.create_widget();
             win_mgr.apply_opacity();
+            // 贴边收缩检测轮询
+            win_mgr.start_dock_watcher();
             // 调试：--open-settings 启动即打开设置窗口
             if std::env::args().any(|a| a == "--open-settings") {
                 win_mgr.open_settings();
@@ -180,6 +182,9 @@ pub fn run() {
             commands::win_set_pinned,
             commands::win_minimize,
             commands::win_close,
+            commands::win_show_mini,
+            commands::win_show_main,
+            commands::win_dock_again,
             commands::app_quit,
         ])
         .run(tauri::generate_context!())
@@ -264,11 +269,13 @@ pub fn set_autolaunch_value(app: &AppHandle, v: bool) -> Result<commands::OkResu
 /// 系统托盘
 fn build_tray(app: &tauri::App) -> tauri::Result<()> {
     let toggle = MenuItemBuilder::with_id("toggle", "显示 / 隐藏").build(app)?;
+    let mini_item = MenuItemBuilder::with_id("mini", "精简模式（剩余用量）").build(app)?;
     let settings_item = MenuItemBuilder::with_id("settings", "设置…").build(app)?;
     let quit = MenuItemBuilder::with_id("quit", "退出").build(app)?;
     let menu = MenuBuilder::new(app)
         .items(&[
             &toggle,
+            &mini_item,
             &settings_item,
             &PredefinedMenuItem::separator(app)?,
             &quit,
@@ -279,6 +286,16 @@ fn build_tray(app: &tauri::App) -> tauri::Result<()> {
         "toggle" => {
             if let Some(st) = app.try_state::<AppState>() {
                 st.win_mgr.toggle_widget();
+            }
+        }
+        "mini" => {
+            // 切换精简模式 / 主界面
+            if let Some(st) = app.try_state::<AppState>() {
+                if st.win_mgr.is_mini() {
+                    st.win_mgr.show_main();
+                } else {
+                    st.win_mgr.show_mini();
+                }
             }
         }
         "settings" => {

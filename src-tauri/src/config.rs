@@ -46,6 +46,17 @@ pub struct GeneralConfig {
     pub opacity: f64,
     #[serde(default)]
     pub always_on_top: bool,
+    // 贴边收缩模式
+    #[serde(default = "default_true")]
+    pub dock_enabled: bool,
+    #[serde(default = "default_dock_metric")]
+    pub dock_metric: String,
+    #[serde(default = "default_true")]
+    pub dock_always_on_top: bool,
+}
+
+fn default_dock_metric() -> String {
+    "go-remaining".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]

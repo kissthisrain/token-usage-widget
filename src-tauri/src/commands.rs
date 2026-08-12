@@ -230,6 +230,26 @@ pub async fn win_close(window: Window) -> Result<OkResult, String> {
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
+// ---- 贴边收缩 ----
+
+#[tauri::command]
+pub async fn win_show_mini(state: State<'_, AppState>) -> Result<OkResult, String> {
+    state.win_mgr.show_mini();
+    Ok(OkResult { ok: true, error: None, path: None })
+}
+
+#[tauri::command]
+pub async fn win_show_main(state: State<'_, AppState>) -> Result<OkResult, String> {
+    state.win_mgr.show_main();
+    Ok(OkResult { ok: true, error: None, path: None })
+}
+
+#[tauri::command]
+pub async fn win_dock_again(state: State<'_, AppState>) -> Result<OkResult, String> {
+    state.win_mgr.dock_again();
+    Ok(OkResult { ok: true, error: None, path: None })
+}
+
 #[tauri::command]
 pub async fn app_quit(app: AppHandle) -> Result<OkResult, String> {
     app.exit(0);

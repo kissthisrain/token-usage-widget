@@ -353,6 +353,9 @@ function loadGeneral() {
   $('gShowQuota').checked = g.showQuota;
   $('gShowCharts').checked = g.showCharts;
   $('gShowModelList').checked = g.showModelList;
+  $('gDockEnabled').checked = g.dockEnabled !== false;
+  $('gDockMetric').value = g.dockMetric || 'go-5h';
+  $('gDockTop').checked = g.dockAlwaysOnTop !== false;
   $('gOpacity').tabIndex = 0;
   opacityVal = Math.round((g.opacity || 0.94) * 100);
   updateOpacityFill();
@@ -400,6 +403,9 @@ function saveGeneral() {
   g.showQuota = $('gShowQuota').checked;
   g.showCharts = $('gShowCharts').checked;
   g.showModelList = $('gShowModelList').checked;
+  g.dockEnabled = $('gDockEnabled').checked;
+  g.dockMetric = $('gDockMetric').value;
+  g.dockAlwaysOnTop = $('gDockTop').checked;
   g.opacity = opacityVal / 100;
 }
 

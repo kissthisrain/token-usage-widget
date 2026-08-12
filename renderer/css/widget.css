@@ -350,3 +350,182 @@
   font-size: 12px; line-height: 1.7;
 }
 .empty b { color: var(--text-dim); }
+
+/* ===== 贴边小条（docked，图一：纯图形槽条） ===== */
+.dock-bar {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: flex;
+  flex-direction: column;          /* 竖条：状态点 + 垂直槽 */
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 0;
+  border-radius: 16px;
+  background: rgba(18, 20, 30, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 6px 28px rgba(0, 0, 0, 0.4);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+body.dock-h .dock-bar {            /* 横条（贴顶/底边）：状态点 + 水平槽 */
+  flex-direction: row;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 12px;
+}
+.dock-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  flex-shrink: 0;
+}
+.dock-dot.err { background: #f87171; box-shadow: 0 0 8px #f87171; }
+/* 槽：底槽 + 渐变填充（槽越满 = 剩余越多） */
+.dock-slot {
+  flex: 1;
+  min-height: 24px;
+  width: 14px;                     /* 竖条槽宽 */
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;          /* 竖：填充自下而上 */
+  justify-content: flex-end;
+  overflow: hidden;
+}
+body.dock-h .dock-slot {
+  flex: 1;
+  width: auto;
+  min-width: 60px;
+  height: 14px;                    /* 横条槽高 */
+  flex-direction: row;             /* 横：填充自左向右 */
+  justify-content: flex-start;
+}
+.dock-fill {
+  display: block;
+  width: 100%;
+  height: 0%;
+  border-radius: 6px;
+  background: linear-gradient(180deg, #4ade80 0%, #facc15 55%, #f87171 100%);
+  transition: height 0.25s ease;
+}
+body.dock-h .dock-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #4ade80 0%, #facc15 55%, #f87171 100%);
+  transition: width 0.25s ease;
+}
+
+/* ===== 精简界面（mini，图二：剩余用量药丸卡片） ===== */
+.mini-view {
+  position: fixed;
+  z-index: 100; /* 必须在 .card 之上，否则被半透明玻璃背景蒙住压暗 */
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  /* 单层一体式卡片：全不透明（不透出窗口亚克力）+ 细描边。
+     描边与卡片共用同一 border-radius，四角不存在内外层半径失调；
+     圆角 12px（卡片仅 190 宽，大圆角会显"软塌"） */
+  border-radius: 12px;
+  background: rgba(26, 30, 42, 1);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 14px 44px rgba(0, 0, 0, 0.55);
+  cursor: default;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.mini-badge {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: linear-gradient(180deg, #2dd4bf, #0ea5a0);
+  color: #04241f;
+  font-size: 13px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow:
+    0 0 10px rgba(45, 212, 191, 0.5),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+}
+.mini-badge.err {
+  background: linear-gradient(180deg, #f87171, #dc2626);
+  color: #fff;
+  box-shadow: 0 0 10px rgba(248, 113, 113, 0.5);
+}
+.mini-ring {
+  position: relative;
+  width: 112px;
+  height: 112px;
+  border-radius: 50%;
+  background: conic-gradient(var(--accent) 0% 72%, rgba(255, 255, 255, 0.15) 72% 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 18px rgba(52, 211, 153, 0.25);
+  transition: box-shadow 0.3s ease;
+}
+.mini-ring::before {
+  content: '';
+  position: absolute;
+  width: 88px;
+  height: 88px;
+  border-radius: 50%;
+  background: #171b28;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+.mini-ring-val {
+  position: relative;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 26px;
+  font-weight: 800;
+  color: #ffffff;
+  letter-spacing: -1px;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.7);
+  transition: text-shadow 0.3s ease;
+}
+.mini-label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.mini-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  width: 100%;
+  padding: 0 20px;
+  margin-top: 2px;
+}
+.mini-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12.5px;
+  padding: 4px 2px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+}
+.mini-row:last-child { border-bottom: none; }
+.mr-label {
+  color: rgba(255, 255, 255, 0.92);
+  font-weight: 500;
+}
+.mr-val {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  color: rgba(255, 255, 255, 0.98);
+  font-weight: 700;
+}

@@ -9,6 +9,24 @@
   <link rel="stylesheet" href="css/widget.css" />
 </head>
 <body>
+  <!-- 贴边小条（docked 时显示：纯图形槽条，槽越满=剩余越多；悬停展开精简界面）
+       deep：整卡任意位置可拖动 -->
+  <div id="dockBar" class="dock-bar hidden" data-tauri-drag-region="deep">
+    <span class="dock-dot"></span>
+    <div class="dock-slot"><i class="dock-fill"></i></div>
+  </div>
+
+  <!-- 精简界面（悬停展开/主界面切换：5h 剩余大数字 + 环形进度 + 周/月剩余；右键切回主界面） -->
+  <div id="miniView" class="mini-view hidden" data-tauri-drag-region="deep">
+    <div class="mini-badge">✓</div>
+    <div class="mini-ring"><span class="mini-ring-val">--</span></div>
+    <div class="mini-label">5 小时剩余</div>
+    <div class="mini-rows">
+      <div class="mini-row"><span class="mr-label">每周剩余</span><span class="mr-val">--</span></div>
+      <div class="mini-row"><span class="mr-label">每月剩余</span><span class="mr-val">--</span></div>
+    </div>
+  </div>
+
   <div class="card">
 
     <!-- ===== 引导页（首次启动/无数据源时） ===== -->
@@ -38,6 +56,11 @@
         <button id="pinBtn" class="pin-btn no-drag" title="钉在前排（置顶）" aria-pressed="false">
           <svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor" aria-hidden="true">
             <path d="M16 9V4h1c.55 0 1-.45 1-1s-.45-1-1-1H7c-.55 0-1 .45-1 1s.45 1 1 1h1v5c0 1.66-1.34 3-3 3v2h5.97v7l1 1 1-1v-7H19v-2c-1.66 0-3-1.34-3-3z"/>
+          </svg>
+        </button>
+        <button id="miniBtn" class="icon-btn no-drag" title="精简视图（剩余用量）">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden="true">
+            <path d="M4 4h16v4H4zM4 10h16v4H4zM4 16h16v4H4z" opacity="0.9"/>
           </svg>
         </button>
         <div class="pills no-drag" id="pills">
