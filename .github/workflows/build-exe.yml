@@ -1,7 +1,9 @@
 # 自动构建 Windows 可执行文件（绿色版，非安装包）
 # 触发：打 v* 开头的 tag（如 v0.1.0），或手动运行（Actions 页面 Run workflow）
 # 产物：token-usage-widget.exe（前端资源已嵌入，双击即可运行，依赖系统 WebView2）
-# 发布：打 tag 时自动创建 GitHub Release 草稿，附上 exe，并自动汇总上次 tag 以来的 commit 标题作为发布说明
+# 发布：打 tag 时自动创建 GitHub Release 草稿，附上 exe
+# 发布说明：优先使用仓库内本地写好的 notes/<tag>.md（如 notes/v0.1.0.md，需随 tag 一起提交）；
+#           若该文件不存在，则自动汇总上次 tag 以来的 commit 标题作为兜底
 
 name: Build Windows exe
 
@@ -40,7 +42,30 @@ jobs:
       - name: Build release exe
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
-      - name: Publish GitHub Release
+      # ---- 发布说明：本地 notes/<tag>.md 优先，缺失则自动生成 ----
+      - name: 解析当前 tag 名称
+        id: tag
+        shell: bash
+        run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: 检查本地发布说明文件是否存在
+        id: notes
+        shell: bash
+        run: |
+          if [ -f "notes/${{ steps.tag.outputs.tag }}.md" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release（使用本地发布说明）
+        if: startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.exists == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/token-usage-widget.exe
+          body_path: notes/${{ steps.tag.outputs.tag }}.md
+          draft: true
+
+      - name: Publish GitHub Release（自动生成发布说明）
+        if: startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
           files: src-tauri/target/release/token-usage-widget.exe
