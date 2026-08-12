@@ -139,8 +139,11 @@ fn normalize_rate_limits(rl: &Value, ts: i64) -> Option<QuotaItem> {
 }
 
 // ---------- Codex 格式（需按时间顺序全文件解析） ----------
-pub fn parse_codex_file(file_path: &Path) -> (Vec<RecordIn>, Vec<QuotaItem>) {
-    let mut records: Vec<RecordIn> = Vec::new();
+// 返回的 u64 是每条记录所在行「内容末尾」的字节偏移（不含换行符）：
+// watcher 用它做水位线去重——只累加偏移超出已消费 offset 的增量记录，
+// 避免每次事件/轮询整文件重读导致 token 数 N 倍膨胀
+pub fn parse_codex_file(file_path: &Path) -> (Vec<(RecordIn, u64)>, Vec<QuotaItem>) {
+    let mut records: Vec<(RecordIn, u64)> = Vec::new();
     let mut rate_limits: Vec<QuotaItem> = Vec::new();
     let mut cur_model: Option<String> = None;
     let mut last_sig: Option<String> = None;
@@ -153,8 +156,13 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<RecordIn>, Vec<QuotaItem>) {
         return (records, rate_limits);
     }
 
-    for line in text.lines() {
+    let mut line_off: u64 = 0;
+    for line in text.split_inclusive('\n') {
+        let line_len = line.len() as u64;
+        // 内容长度去掉行尾换行符（\n / \r\n），偏移因此对两种换行都正确
+        let content_end = line_off + line.trim_end_matches(['\n', '\r']).len() as u64;
         if line.trim().is_empty() {
+            line_off += line_len;
             continue;
         }
         let r: Value = match serde_json::from_str(line) {
@@ -186,16 +194,19 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<RecordIn>, Vec<QuotaItem>) {
                 let sig = format!("{ts:?}|{cur_model:?}|{input:?}|{output:?}|{total}");
                 if last_sig.as_deref() != Some(sig.as_str()) {
                     last_sig = Some(sig);
-                    records.push(RecordIn {
-                        ts: ts.or(Some(crate::util::now_ms())),
-                        model: cur_model.clone().or_else(|| pick_model_from_record(&r)),
-                        provider: Some("codex".to_string()),
-                        input,
-                        output,
-                        total,
-                        cache_read: u.get("cached_input_tokens").and_then(Value::as_f64),
-                        cost: None,
-                    });
+                    records.push((
+                        RecordIn {
+                            ts: ts.or(Some(crate::util::now_ms())),
+                            model: cur_model.clone().or_else(|| pick_model_from_record(&r)),
+                            provider: Some("codex".to_string()),
+                            input,
+                            output,
+                            total,
+                            cache_read: u.get("cached_input_tokens").and_then(Value::as_f64),
+                            cost: None,
+                        },
+                        content_end,
+                    ));
                 }
             }
         }
@@ -205,6 +216,7 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<RecordIn>, Vec<QuotaItem>) {
                 rate_limits.push(item);
             }
         }
+        line_off += line_len;
     }
     (records, rate_limits)
 }
@@ -212,7 +224,8 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<RecordIn>, Vec<QuotaItem>) {
 /// 通用入口：zcode / 自定义 → 逐行 zcode 解析；codex → 全文件有序解析
 pub fn parse_file(file_path: &Path, format: &str) -> (Vec<RecordIn>, Vec<QuotaItem>) {
     if format == "codex" {
-        return parse_codex_file(file_path);
+        let (records, rate_limits) = parse_codex_file(file_path);
+        return (records.into_iter().map(|(r, _)| r).collect(), rate_limits);
     }
     let text = match std::fs::read_to_string(file_path) {
         Ok(t) => t,
@@ -299,4 +312,71 @@ pub fn extract_json_record(buf: &[u8], from: usize) -> Option<(usize, usize)> {
         }
     }
     None // 未闭合（写入中）
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn token_count_line(ts: &str, total: i64) -> String {
+        serde_json::json!({
+            "type": "event_msg",
+            "timestamp": ts,
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "last_token_usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "total_tokens": total
+                    }
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn codex_watermark_filters_accumulated_history() {
+        let dir = std::env::temp_dir().join(format!(
+            "usage-test-codex-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("rollout-test.jsonl");
+        let mut f = std::fs::File::create(&file).unwrap();
+        // 第一段：两条记录 → 水位线 = 文件大小
+        writeln!(f, "{}", token_count_line("2026-08-12T01:00:00Z", 100)).unwrap();
+        writeln!(f, "{}", token_count_line("2026-08-12T01:01:00Z", 200)).unwrap();
+        f.flush().unwrap();
+        let size1 = std::fs::metadata(&file).unwrap().len();
+
+        let (records, _) = parse_codex_file(&file);
+        assert_eq!(records.len(), 2, "首轮应解析出全部 2 条");
+        let all_off: Vec<u64> = records.iter().map(|(_, o)| *o).collect();
+        assert!(all_off[0] < all_off[1] && all_off[1] <= size1, "偏移应单调且不越过文件");
+
+        // 模拟文件增长：再追加两条记录
+        let mut f = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        writeln!(f, "{}", token_count_line("2026-08-12T01:02:00Z", 300)).unwrap();
+        writeln!(f, "{}", token_count_line("2026-08-12T01:03:00Z", 400)).unwrap();
+        f.flush().unwrap();
+
+        let (records, _) = parse_codex_file(&file);
+        assert_eq!(records.len(), 4, "整文件解析出全部 4 条");
+        // 水位线去重：只保留内容末尾偏移超出 size1 的增量记录
+        let delta: Vec<&RecordIn> = records
+            .iter()
+            .filter(|(_, end_off)| *end_off > size1)
+            .map(|(r, _)| r)
+            .collect();
+        assert_eq!(delta.len(), 2, "水位线之后应只有 2 条新增记录");
+        assert_eq!(delta.iter().map(|r| r.total as i64).sum::<i64>(), 700);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

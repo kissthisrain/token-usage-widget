@@ -8,7 +8,7 @@ use crate::config::SourceConfig;
 use crate::events::DataUpdate;
 use crate::history::{HistoryStore, QuotaInfo, QuotaItem, RecordIn};
 use crate::sources::local_logs::{
-    extract_json_record, list_jsonl_files, parse_file, scan_params_for_source, ScanParams,
+    extract_json_record, list_jsonl_files, parse_codex_file, scan_params_for_source, ScanParams,
 };
 use crate::sqlite_import::import_zcode_history;
 use crate::util::{days_ago_key, now_ms, parse_ts};
@@ -325,12 +325,18 @@ impl WatcherInner {
             Err(_) => return,
         };
 
-        // codex 文件整体有序解析 → 全量重读
+        // codex 文件整体有序解析 → 全量重读（解析依赖上下文，如 turn_context 决定 model），
+        // 但只累加「内容末尾偏移 > 已消费 offset」的增量记录，重复事件/轮询不会重复累计
         if params.format == "codex" {
-            let (records, rate_limits) = parse_file(file, "codex");
-            if !records.is_empty() {
-                let n = records.len() as u64;
-                self.history.add_records(&src.id, records, true);
+            let (records, rate_limits) = parse_codex_file(file);
+            let delta: Vec<RecordIn> = records
+                .into_iter()
+                .filter(|(_, end_off)| *end_off > start)
+                .map(|(r, _)| r)
+                .collect();
+            if !delta.is_empty() {
+                let n = delta.len() as u64;
+                self.history.add_records(&src.id, delta, true);
                 let _ = self.app.emit(
                     "data:update",
                     DataUpdate {
