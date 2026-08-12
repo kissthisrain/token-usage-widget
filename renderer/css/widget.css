@@ -459,3 +459,20 @@
   color: rgba(255, 255, 255, 0.98);
   font-weight: 700;
 }
+
+/* ===== 提示条（自愈/异常事件） ===== */
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  transform: translateX(-50%);
+  max-width: 92%;
+  background: rgba(233, 168, 32, 0.94);
+  color: #1c1c1e;
+  padding: 7px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
+  z-index: 99;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+}

@@ -27,6 +27,7 @@ const STALL_MIN_DELTA: u64 = 1024 * 1024;
 /// sqlite 权威数据周期回填间隔（纠正 rollout 增量的瞬时误差）
 const SQLITE_REIMPORT_MS: u64 = 5 * 60 * 1000;
 
+#[derive(Clone)]
 pub struct Watcher {
     inner: Arc<WatcherInner>,
 }
@@ -40,6 +41,10 @@ struct WatcherInner {
     last_advance: Mutex<HashMap<String, i64>>,
     event_tx: Mutex<Option<mpsc::UnboundedSender<Result<Event, notify::Error>>>>,
     stopped: AtomicBool,
+    /// 后台循环任务句柄（stop/restart 时 abort，避免泄漏旧任务双倍轮询）
+    tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
+    /// 事件去抖：300ms 内同一源的高频事件合并为一次扫描
+    pending_scans: Mutex<HashSet<String>>,
 }
 
 impl Watcher {
@@ -58,28 +63,34 @@ impl Watcher {
                 last_advance: Mutex::new(HashMap::new()),
                 event_tx: Mutex::new(None),
                 stopped: AtomicBool::new(false),
+                tasks: Mutex::new(Vec::new()),
+                pending_scans: Mutex::new(HashSet::new()),
             }),
         }
     }
 
     /// 启动事件消费循环 + 30s 轮询兜底
     pub fn start(&self) {
+        let this = self.clone();
         let inner = self.inner.clone();
         let (tx, mut rx) = mpsc::unbounded_channel::<Result<Event, notify::Error>>();
         *inner.event_tx.lock().unwrap() = Some(tx);
         // 事件消费循环
-        let inner2 = inner.clone();
-        tauri::async_runtime::spawn(async move {
-            while let Some(Ok(ev)) = rx.recv().await {
-                if inner2.stopped.load(Ordering::SeqCst) {
+        let inner1 = inner.clone();
+        let h1 = tauri::async_runtime::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                if inner1.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                inner2.handle_event(&ev);
+                match ev {
+                    Ok(ev) => this.handle_event(&ev),
+                    Err(e) => log::warn!("[watcher] notify 事件错误: {e}"),
+                }
             }
         });
         // 30s 轮询兜底 + 自愈
         let inner3 = inner.clone();
-        tauri::async_runtime::spawn(async move {
+        let h2 = tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(POLL_MS));
             interval.tick().await; // 首次立即
             loop {
@@ -92,7 +103,7 @@ impl Watcher {
         });
         // 每 5 分钟用 sqlite 权威数据整体回填（幂等），纠正 rollout 增量误差
         let inner4 = inner.clone();
-        tauri::async_runtime::spawn(async move {
+        let h3 = tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(SQLITE_REIMPORT_MS));
             interval.tick().await; // 首次立即
             loop {
@@ -103,11 +114,17 @@ impl Watcher {
                 interval.tick().await;
             }
         });
+        inner.tasks.lock().unwrap().extend([h1, h2, h3]);
     }
 
     pub fn stop(&self) {
         self.inner.stopped.store(true, Ordering::SeqCst);
         self.inner.watchers.lock().unwrap().clear();
+        // abort 后台循环任务，避免 restart 后旧任务残留（双倍轮询/事件丢失）
+        for h in self.inner.tasks.lock().unwrap().drain(..) {
+            h.abort();
+        }
+        self.inner.pending_scans.lock().unwrap().clear();
     }
 
     /// 重建监听（配置变更后调用）
@@ -119,6 +136,62 @@ impl Watcher {
         for src in sources {
             self.inner.watch_source(&src);
         }
+    }
+
+    /// 文件系统事件 → 命中的源做去抖扫描
+    fn handle_event(&self, ev: &Event) {
+        let inner = &self.inner;
+        if inner.stopped.load(Ordering::SeqCst) {
+            return;
+        }
+        let sources = (inner.get_sources)();
+        for src in &sources {
+            if src.type_ != "local-logs" || !src.enabled {
+                continue;
+            }
+            let Some(dir) = &src.path else { continue };
+            let dirb = PathBuf::from(dir);
+            let hit = ev.paths.iter().any(|p| p.starts_with(&dirb));
+            if !hit {
+                continue;
+            }
+            let params = scan_params_for_source(src);
+            let name_hit = ev.paths.iter().any(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| params.pattern.is_match(n))
+                    .unwrap_or(false)
+            });
+            let structural = matches!(
+                ev.kind,
+                notify::EventKind::Remove(_)
+                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+                    | notify::EventKind::Create(_)
+            );
+            if name_hit || structural {
+                self.schedule_scan(src, &params);
+            }
+        }
+    }
+
+    /// 事件去抖：300ms 内同一源的高频事件（Codex 每 turn 追加多行）合并为一次扫描
+    fn schedule_scan(&self, src: &SourceConfig, params: &ScanParams) {
+        let mut pending = self.inner.pending_scans.lock().unwrap();
+        if !pending.insert(src.id.clone()) {
+            return;
+        }
+        drop(pending);
+        let this = self.clone();
+        let src = src.clone();
+        let params = params.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            this.inner.pending_scans.lock().unwrap().remove(&src.id);
+            if this.inner.stopped.load(Ordering::SeqCst) {
+                return;
+            }
+            this.inner.scan_source(&src, &params);
+        });
     }
 }
 
@@ -181,40 +254,6 @@ impl WatcherInner {
         }
     }
 
-    fn handle_event(&self, ev: &Event) {
-        if self.stopped.load(Ordering::SeqCst) {
-            return;
-        }
-        let sources = (self.get_sources)();
-        for src in &sources {
-            if src.type_ != "local-logs" || !src.enabled {
-                continue;
-            }
-            let Some(dir) = &src.path else { continue };
-            let dirb = PathBuf::from(dir);
-            let hit = ev.paths.iter().any(|p| p.starts_with(&dirb));
-            if !hit {
-                continue;
-            }
-            let params = scan_params_for_source(src);
-            let name_hit = ev.paths.iter().any(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| params.pattern.is_match(n))
-                    .unwrap_or(false)
-            });
-            let structural = matches!(
-                ev.kind,
-                notify::EventKind::Remove(_)
-                    | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-                    | notify::EventKind::Create(_)
-            );
-            if name_hit || structural {
-                self.scan_source(src, &params);
-            }
-        }
-    }
-
     fn poll_all(&self) {
         let sources = (self.get_sources)();
         for src in &sources {
@@ -255,6 +294,17 @@ impl WatcherInner {
             self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
             return;
         }
+        // 清数据前验证文件可读：文件打不开（独占锁/网络盘断连）时，
+        // 清了历史也补不回来 → 只跳过本轮，下轮重试
+        let readable = files.iter().any(|f| std::fs::File::open(f).is_ok());
+        if !readable {
+            log::warn!(
+                "[watcher] {} 文件当前不可读，暂不清数据（下轮重试）",
+                src.name
+            );
+            self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+            return;
+        }
         log::warn!(
             "[watcher] {} 疑似卡死（{}KB 未消费），重置偏移全量重扫…",
             src.name,
@@ -262,6 +312,8 @@ impl WatcherInner {
         );
         let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
         self.history.reset_file_offsets(&src.id, &file_strs);
+        // 清数据前备份快照（误判时可用 history.json.pre-heal.bak 手工恢复）
+        self.history.backup_before_heal();
         let cutoff = days_ago_key(34);
         self.history.clear_source_days_from(&src.id, &cutoff);
         self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());

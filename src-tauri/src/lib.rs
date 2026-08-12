@@ -185,8 +185,16 @@ pub fn run() {
             commands::win_ready,
             commands::app_quit,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // 退出前落盘：save_debounced 有 800ms 防抖窗口，直接退出会丢最后一批数据
+            if let tauri::RunEvent::Exit = event {
+                if let Some(st) = app_handle.try_state::<AppState>() {
+                    st.history.save_now();
+                }
+            }
+        });
 }
 
 /// 配置保存后重启核心服务（对齐 reinitCore）

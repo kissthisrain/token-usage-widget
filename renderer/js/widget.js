@@ -5,6 +5,16 @@ const api = window.TW;
 const U = window.U;
 const $ = (id) => document.getElementById(id);
 
+/** 底部提示条：显示一段时间后自动消失 */
+function showToast(msg) {
+  const el = $('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove('hidden');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => el.classList.add('hidden'), 8000);
+}
+
 const state = {
   range: 'month',
   sourceId: 'all',
@@ -611,7 +621,12 @@ async function init() {
 
   // 实时更新（去抖）
   let t = null;
-  api.onUpdate(() => {
+  api.onUpdate((ev) => {
+    // 自愈事件：数据源卡死被重置偏移 + 重扫（原数据已备份），提示用户
+    if (ev && ev.healed) {
+      const srcName = ((state.config && state.config.sources.find((s) => s.id === ev.sourceId)) || {}).name || ev.sourceId || '';
+      showToast(`「${srcName}」长时间未更新，已重置偏移并重新扫描（原数据已备份为 history.json.pre-heal.bak）`);
+    }
     if (t) clearTimeout(t);
     t = setTimeout(() => {
       if (!$('onboarding').classList.contains('hidden')) return;

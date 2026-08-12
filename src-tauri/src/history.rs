@@ -617,6 +617,16 @@ impl HistoryStore {
             m.insert(f.clone(), 0);
         }
     }
+
+    /// 自愈清数据前快照备份：history.json.pre-heal.bak（仅文件存在时；误判时可手工恢复）
+    pub fn backup_before_heal(&self) {
+        if self.no_persist {
+            return;
+        }
+        if self.file.exists() {
+            let _ = std::fs::copy(&self.file, self.file.with_extension("json.pre-heal.bak"));
+        }
+    }
 }
 
 // ---------- 聚合返回结构 ----------
