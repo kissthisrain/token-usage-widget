@@ -253,6 +253,12 @@
   flex-shrink: 0;
   text-shadow: 0 0 8px currentColor;
 }
+/* 品牌 logo（内联 SVG；父级 .model-name 为 flex 容器，无需 display/vertical-align） */
+.model-ico.logo {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+}
 .model-name .src-tag { flex-shrink: 0; }
 .model-nums {
   font-family: var(--font-num);

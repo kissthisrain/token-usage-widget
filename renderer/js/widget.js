@@ -227,13 +227,16 @@ function renderModels(s) {
   list.innerHTML = s.models.slice(0, 30).map((m) => {
     const color = U.modelColor(m.model);
     const glyph = providerGlyph(m.sourceName || m.model);
+    // 品牌 logo 优先（模型名 → 源名），未识别回退彩色字形
+    const logo = modelLogo(m.model) || modelLogo(m.sourceName);
+    const ico = logo || `<span class="model-ico" style="color:${color}">${glyph}</span>`;
     const share = Math.round((m.tokens / total) * 100);
     const pct = Math.max(2, share); // 最小可见条
     const cost = m.cost > 0 ? `<span class="cost">${U.fmtMoney(m.cost, 'USD')}</span>` : '';
     const zeroCls = share === 0 ? ' zero' : '';
     return `<div class="model-row${zeroCls}">
       <div class="model-top">
-        <span class="model-name"><span class="model-ico" style="color:${color}">${glyph}</span>${U.esc(m.model)}<span class="src-tag">${U.esc(m.sourceName || '')}</span></span>
+        <span class="model-name">${ico}${U.esc(m.model)}<span class="src-tag">${U.esc(m.sourceName || '')}</span></span>
         <span class="model-nums">${U.fmtCompact(m.tokens)}${cost}${share > 0 ? `<span class="share">${share}%</span>` : ''}</span>
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
