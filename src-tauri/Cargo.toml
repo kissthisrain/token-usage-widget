@@ -2,7 +2,7 @@
 name = "token-usage-widget"
 version = "0.1.0"
 description = "Token 用量监控悬浮小组件（Rust + Tauri 重写版）"
-authors = ["张海涛"]
+authors = ["kissthisrain"]
 edition = "2021"
 
 [lib]
