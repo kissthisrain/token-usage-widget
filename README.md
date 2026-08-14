@@ -37,6 +37,16 @@
 
 ## 安装与运行
 
+### 直接下载（推荐，无需本地构建）
+
+普通用户**无需安装 Rust / Node 环境**，直接前往 [Release 下载页](https://github.com/kissthisrain/token-usage-widget/releases) 下载最新版 `token-usage-widget.exe` 即可：
+
+- 绿色版单文件，双击即用，前端资源已完整嵌入，不产生安装目录
+- 由 CI 使用 release 配置构建（`cargo build --release`），随 `v*` tag 自动发布
+- 依赖系统自带的 WebView2 运行时（Win10/11 自带，无需额外安装）
+
+> ⚠️ Release 建议下载已正式发布的版本；macOS/Linux 用户请自行按下方源码方式构建。
+
 ### 开发模式
 
 ```bash
