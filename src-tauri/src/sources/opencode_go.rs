@@ -357,7 +357,7 @@ pub async fn probe_quota(source: &SourceConfig) -> ProbeQuotaResult {
             }
         }
     };
-    // 未登录会被 302 到 /auth/authorize
+    // 未登录会被 302 到 /auth/authorize（手动跟随的跳转链同样命中）
     let loc = res
         .header("location")
         .map(|s| s.to_string())
@@ -365,6 +365,7 @@ pub async fn probe_quota(source: &SourceConfig) -> ProbeQuotaResult {
     if res.status == 302
         || res.status == 401
         || loc.contains("/auth/authorize")
+        || res.redirects.iter().any(|u| u.contains("/auth/"))
     {
         return ProbeQuotaResult {
             ok: false,

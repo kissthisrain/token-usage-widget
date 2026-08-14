@@ -11,7 +11,7 @@ use crate::sources::local_logs::{
     extract_json_record, list_jsonl_files, parse_codex_file, scan_params_for_source, ScanParams,
 };
 use crate::sqlite_import::import_zcode_history;
-use crate::util::{days_ago_key, now_ms, parse_ts};
+use crate::util::{now_ms, parse_ts};
 use notify::{Event, RecursiveMode};
 use notify::Watcher as _;
 use std::collections::{HashMap, HashSet};
@@ -26,6 +26,8 @@ const STALL_MS: i64 = 3 * 60000;
 const STALL_MIN_DELTA: u64 = 1024 * 1024;
 /// sqlite 权威数据周期回填间隔（纠正 rollout 增量的瞬时误差）
 const SQLITE_REIMPORT_MS: u64 = 5 * 60 * 1000;
+/// 单文件解析大小上限（超出跳过，避免异常大文件拖垮/占满内存）
+const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone)]
 pub struct Watcher {
@@ -45,6 +47,12 @@ struct WatcherInner {
     tasks: Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>,
     /// 事件去抖：300ms 内同一源的高频事件合并为一次扫描
     pending_scans: Mutex<HashSet<String>>,
+    /// 配置代际：restart 时 +1，异步扫描任务启动时捕获，代际不符则放弃（防旧配置扫描残留）
+    epoch: std::sync::atomic::AtomicU64,
+    /// 轮询阻塞任务是否在跑（防 30s 间隔叠加排队）
+    poll_inflight: std::sync::atomic::AtomicBool,
+    /// 重建（清空重扫）进行中的源集合：scan_source 与 rebuild_source 互斥，防并发双计
+    rebuilding: Mutex<HashSet<String>>,
 }
 
 impl Watcher {
@@ -65,6 +73,9 @@ impl Watcher {
                 stopped: AtomicBool::new(false),
                 tasks: Mutex::new(Vec::new()),
                 pending_scans: Mutex::new(HashSet::new()),
+                epoch: std::sync::atomic::AtomicU64::new(0),
+                poll_inflight: std::sync::atomic::AtomicBool::new(false),
+                rebuilding: Mutex::new(HashSet::new()),
             }),
         }
     }
@@ -88,16 +99,16 @@ impl Watcher {
                 }
             }
         });
-        // 30s 轮询兜底 + 自愈
-        let inner3 = inner.clone();
+        // 30s 轮询兜底 + 自愈（文件 IO 放到 spawn_blocking，避免阻塞 async worker）
+        let this2 = self.clone();
         let h2 = tauri::async_runtime::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(POLL_MS));
             interval.tick().await; // 首次立即
             loop {
-                if inner3.stopped.load(Ordering::SeqCst) {
+                if this2.inner.stopped.load(Ordering::SeqCst) {
                     break;
                 }
-                inner3.poll_all();
+                this2.poll_all_blocking();
                 interval.tick().await;
             }
         });
@@ -131,10 +142,32 @@ impl Watcher {
     pub fn restart(&self) {
         self.stop();
         self.inner.stopped.store(false, Ordering::SeqCst);
+        // 代际 +1：让上一代异步扫描任务（sleep 去抖/初始扫描）失效，避免旧配置残留
+        self.inner.epoch.fetch_add(1, Ordering::SeqCst);
         self.start();
         let sources = (self.inner.get_sources)();
         for src in sources {
             self.inner.watch_source(&src);
+            // 初始扫描（含增量）只针对启用的本地记录源；Watcher 可克隆，放 spawn_blocking
+            // 避免阻塞调用线程（重启/保存配置路径），并带 epoch 检查防止旧配置扫描残留
+            if src.type_ != "local-logs" || !src.enabled {
+                continue;
+            }
+            let params = scan_params_for_source(&src);
+            let epoch = self.inner.epoch.load(Ordering::SeqCst);
+            let this = self.clone();
+            let src0 = src.clone();
+            let params0 = params.clone();
+            tauri::async_runtime::spawn(async move {
+                let this2 = this.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    if this2.inner.epoch.load(Ordering::SeqCst) != epoch {
+                        return; // 配置已变更，放弃旧扫描
+                    }
+                    this2.inner.scan_source(&src0, &params0);
+                })
+                .await;
+            });
         }
     }
 
@@ -174,6 +207,22 @@ impl Watcher {
         }
     }
 
+    /// 轮询兜底：文件 IO 放到 spawn_blocking（30s 间隔 + inflight 防抖，避免阻塞 async worker）
+    fn poll_all_blocking(&self) {
+        if self.inner.poll_inflight.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let this = self.clone();
+        tauri::async_runtime::spawn(async move {
+            let this2 = this.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                this2.inner.poll_all();
+            })
+            .await;
+            this.inner.poll_inflight.store(false, Ordering::SeqCst);
+        });
+    }
+
     /// 事件去抖：300ms 内同一源的高频事件（Codex 每 turn 追加多行）合并为一次扫描
     fn schedule_scan(&self, src: &SourceConfig, params: &ScanParams) {
         let mut pending = self.inner.pending_scans.lock().unwrap();
@@ -184,13 +233,22 @@ impl Watcher {
         let this = self.clone();
         let src = src.clone();
         let params = params.clone();
+        let epoch = self.inner.epoch.load(Ordering::SeqCst);
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             this.inner.pending_scans.lock().unwrap().remove(&src.id);
-            if this.inner.stopped.load(Ordering::SeqCst) {
+            if this.inner.stopped.load(Ordering::SeqCst)
+                || this.inner.epoch.load(Ordering::SeqCst) != epoch
+            {
                 return;
             }
-            this.inner.scan_source(&src, &params);
+            let this2 = this.clone();
+            let src2 = src.clone();
+            let params2 = params.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                this2.inner.scan_source(&src2, &params2);
+            })
+            .await;
         });
     }
 }
@@ -231,8 +289,7 @@ impl WatcherInner {
             }
         }
         self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
-        // 初始扫描（含增量）
-        self.scan_source(src, &params);
+        // 初始扫描（含增量）由 restart() 统一发起（Watcher 可克隆，spawn_blocking + epoch 检查）
         // ZCode 数据库历史回填（只回填今天之前，异步不阻塞）
         if src.tool.as_deref() == Some("zcode") && src.import_sqlite != Some(false) {
             let src = src.clone();
@@ -310,14 +367,38 @@ impl WatcherInner {
             src.name,
             total_size.saturating_sub(consumed) / 1024
         );
-        let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
-        self.history.reset_file_offsets(&src.id, &file_strs);
         // 清数据前备份快照（误判时可用 history.json.pre-heal.bak 手工恢复）
         self.history.backup_before_heal();
-        let cutoff = days_ago_key(34);
-        self.history.clear_source_days_from(&src.id, &cutoff);
+        if self.rebuild_source(src, params) {
+            // 只有本次调用真正执行了重建才做收尾；提前返回（已有重建在进行）时
+            // 由发起方负责回填与通知，避免重复回填/误导性 toast
+            self.after_rebuild(src);
+        }
+    }
+
+    /// 重建某源：重置全部文件偏移 + 清空该源全部 days/recent + 全量重扫。
+    /// 返回 true 表示本次调用实际执行了重建；false 表示该源已在重建中（跳过，
+    /// 由发起方负责收尾）。按源标记 rebuilding，与 scan_source 互斥防并发双计。
+    fn rebuild_source(&self, src: &SourceConfig, params: &ScanParams) -> bool {
+        if !self.rebuilding.lock().unwrap().insert(src.id.clone()) {
+            return false; // 该源已在重建中（嵌套触发），跳过
+        }
+        let dir = PathBuf::from(src.path.clone().unwrap_or_default());
+        let files = list_jsonl_files(&dir, params.recursive, &params.pattern);
+        let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        self.history.reset_file_offsets(&src.id, &file_strs);
+        // 必须清干净再重扫：旧记录若保留，重扫会把它们再累加一遍（双倍计数）
+        self.history.clear_source_all(&src.id);
+        for f in &files {
+            self.read_delta(src, params, f);
+        }
         self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
-        self.scan_source(src, params);
+        self.rebuilding.lock().unwrap().remove(&src.id);
+        true
+    }
+
+    /// 重建成功后的收尾：zcode 源异步 sqlite 回填 + 通知前端（自愈提示）
+    fn after_rebuild(&self, src: &SourceConfig) {
         if src.tool.as_deref() == Some("zcode") && src.import_sqlite != Some(false) {
             let src = src.clone();
             let history = self.history.clone();
@@ -337,7 +418,9 @@ impl WatcherInner {
     }
 
     fn scan_source(&self, src: &SourceConfig, params: &ScanParams) {
-        if self.scanning.lock().unwrap().contains(&src.id) {
+        if self.scanning.lock().unwrap().contains(&src.id)
+            || self.rebuilding.lock().unwrap().contains(&src.id)
+        {
             return;
         }
         self.scanning.lock().unwrap().insert(src.id.clone());
@@ -358,32 +441,44 @@ impl WatcherInner {
             return;
         }
         let off = self.history.get_file_offset(&src.id, &file.to_string_lossy());
-        let start = if off > size { 0 } else { off };
-        if start == size {
+        // 文件被截断/重写（offset 越过当前大小）：直接重建该源，防止整文件重加导致双倍计数
+        if off > size {
+            log::warn!(
+                "[watcher] {} 检测到文件被截断/重写（off={} > size={}），重建该源数据…",
+                src.name,
+                off,
+                size
+            );
+            self.history.backup_before_heal();
+            if self.rebuild_source(src, params) {
+                // 仅当本次调用真正执行了重建才做收尾（避免重复回填/误导性 toast）
+                self.after_rebuild(src);
+            }
             return;
         }
-        let buf: Vec<u8> = match std::fs::File::open(file) {
-            Ok(mut f) => {
-                use std::io::{Read, Seek, SeekFrom};
-                if f.seek(SeekFrom::Start(start)).is_err() {
-                    return;
-                }
-                let mut b = vec![0u8; (size - start) as usize];
-                if f.read_exact(&mut b).is_err() {
-                    return;
-                }
-                b
-            }
-            Err(_) => return,
-        };
+        if off == size {
+            return;
+        }
 
         // codex 文件整体有序解析 → 全量重读（解析依赖上下文，如 turn_context 决定 model），
         // 但只累加「内容末尾偏移 > 已消费 offset」的增量记录，重复事件/轮询不会重复累计
         if params.format == "codex" {
+            if size > MAX_FILE_BYTES {
+                // 跳过超大文件，但标记为已消费：否则每次轮询重试 + 触发反复自愈（清空重扫）
+                log::warn!(
+                    "[watcher] {} 文件超过 {}MB 跳过解析（已标记消费，新追加内容仍会统计）：{}",
+                    src.name,
+                    MAX_FILE_BYTES / 1024 / 1024,
+                    file.display()
+                );
+                self.history.set_file_offset(&src.id, &file.to_string_lossy(), size);
+                self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+                return;
+            }
             let (records, rate_limits) = parse_codex_file(file);
             let delta: Vec<RecordIn> = records
                 .into_iter()
-                .filter(|(_, end_off)| *end_off > start)
+                .filter(|(_, end_off)| *end_off > off)
                 .map(|(r, _)| r)
                 .collect();
             if !delta.is_empty() {
@@ -428,7 +523,21 @@ impl WatcherInner {
             return;
         }
 
-        // 多行安全解析：花括号配对提取，损坏片段跳过，尾部未写完留待下次
+        // zcode：只读增量（多行安全解析：花括号配对提取，损坏片段跳过，尾部未写完留待下次）
+        let buf: Vec<u8> = match std::fs::File::open(file) {
+            Ok(mut f) => {
+                use std::io::{Read, Seek, SeekFrom};
+                if f.seek(SeekFrom::Start(off)).is_err() {
+                    return;
+                }
+                let mut b = vec![0u8; (size - off) as usize];
+                if f.read_exact(&mut b).is_err() {
+                    return; // 读取中途被截断，保持偏移不动，下轮处理
+                }
+                b
+            }
+            Err(_) => return,
+        };
         let mut records: Vec<RecordIn> = Vec::new();
         let mut pos: usize = 0;
         while pos < buf.len() {
@@ -462,8 +571,8 @@ impl WatcherInner {
                 },
             );
         }
-        let end_offset = (start + pos as u64).min(size);
-        if end_offset > start {
+        let end_offset = (off + pos as u64).min(size);
+        if end_offset > off {
             self.history.set_file_offset(&src.id, &file.to_string_lossy(), end_offset);
             self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
         }

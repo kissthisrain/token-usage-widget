@@ -69,41 +69,6 @@ fn auth_ok(token: &str, parts: &hyper::http::request::Parts) -> bool {
     tok == token
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use hyper::http::Request;
-
-    fn parts_with(headers: &[(&str, &str)]) -> hyper::http::request::Parts {
-        let mut req = Request::builder().uri("/v1/chat/completions");
-        for (k, v) in headers {
-            req = req.header(*k, *v);
-        }
-        req.body(()).unwrap().into_parts().0
-    }
-
-    #[test]
-    fn proxy_auth_requires_token() {
-        assert!(!auth_ok("secret", &parts_with(&[])), "无 token 应拒绝");
-        assert!(!auth_ok("secret", &parts_with(&[("x-proxy-token", "wrong")])), "错误 token 应拒绝");
-        assert!(auth_ok("secret", &parts_with(&[("x-proxy-token", "secret")])), "正确 token 应通过");
-    }
-
-    #[test]
-    fn proxy_auth_rejects_untrusted_origin() {
-        // 恶意网页：即使带正确 token，非受信 Origin 也拒绝
-        assert!(!auth_ok("secret", &parts_with(&[
-            ("x-proxy-token", "secret"),
-            ("origin", "http://evil.com"),
-        ])));
-        // 本应用 webview 的 Origin 允许
-        assert!(auth_ok("secret", &parts_with(&[
-            ("x-proxy-token", "secret"),
-            ("origin", "http://ipc.localhost"),
-        ])));
-    }
-}
-
 pub struct GoProxy {
     inner: Arc<GoProxyInner>,
 }
@@ -132,6 +97,15 @@ fn gen_token() -> String {
             }
         })
         .collect()
+}
+
+/// 从 SSE 行缓冲取出所有完整行（含 \n，去掉 \r），未完成的尾部留在缓冲里
+fn drain_sse_lines(buf: &mut String, mut on_line: impl FnMut(&str)) {
+    while let Some(idx) = buf.find('\n') {
+        let line: String = buf[..idx].trim_end_matches('\r').to_string();
+        buf.drain(..=idx);
+        on_line(&line);
+    }
 }
 
 impl GoProxy {
@@ -303,7 +277,7 @@ impl GoProxyInner {
             .ok()
             .and_then(|v| v.get("model").and_then(Value::as_str).map(|s| s.to_string()));
 
-        let is_stream = parts
+        let accept_sse = parts
             .headers
             .get("accept")
             .and_then(|v| v.to_str().ok())
@@ -314,7 +288,8 @@ impl GoProxyInner {
         let path = parts.uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
         let target_url = format!("{}{}", self.base_url(), path);
 
-        // 构建上游请求：透传除 hop-by-hop 外的所有头（Authorization 保留）
+        // 构建上游请求：透传除 hop-by-hop 外的所有头（Authorization 保留；
+        // x-proxy-token 是给本代理的认证头，不该转发给上游）
         // 上游超时 60s + 禁止自动重定向；构建失败直接报错（不回退默认 client，避免跟随重定向泄凭据）
         let client = match reqwest::Client::builder()
             .timeout(UPSTREAM_TIMEOUT)
@@ -337,7 +312,7 @@ impl GoProxyInner {
             let name = k.as_str().to_lowercase();
             if matches!(
                 name.as_str(),
-                "host" | "connection" | "content-length" | "transfer-encoding"
+                "host" | "connection" | "content-length" | "transfer-encoding" | "x-proxy-token"
             ) {
                 continue;
             }
@@ -360,6 +335,23 @@ impl GoProxyInner {
             }
         };
 
+        // 是否流式：以上游响应 content-type 为准（客户端 accept 头可能误报）。
+        // 只有明确 JSON 才走整包解析；未声明或非 JSON 类型（如 text/plain 的流式服务）
+        // 回退到客户端 accept 判断，避免流式响应被整包收集后按行解析漏掉 usage
+        let resp_ct = upstream
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+        let is_stream = if resp_ct.contains("text/event-stream") {
+            true
+        } else if resp_ct.contains("json") {
+            false // 明确 JSON → 非流式，收集完整响应后解析
+        } else {
+            accept_sse
+        };
+
         let status = upstream.status();
         let mut builder = Response::builder().status(status);
         for (k, v) in upstream.headers() {
@@ -373,12 +365,13 @@ impl GoProxyInner {
         }
 
         if is_stream {
-            // SSE 流式：边转发边解析 usage（对齐 parseStreamChunk）
+            // SSE 流式：边转发边解析 usage（跨 chunk 缓冲未完成行，防止半截 data: 行漏记）
             let model = req_model.clone();
             let this = self.clone();
+            let mut line_buf = String::new();
             let stream = upstream.bytes_stream().map(move |chunk| {
                 if let Ok(c) = &chunk {
-                    this.parse_stream_chunk(c, model.as_deref());
+                    this.parse_stream_chunk(c, model.as_deref(), &mut line_buf);
                 }
                 chunk.map_err(|e| io::Error::other(e.to_string()))
             });
@@ -398,20 +391,27 @@ impl GoProxyInner {
         }
     }
 
-    /// SSE chunk 逐行解析（容忍半截 JSON）
-    fn parse_stream_chunk(&self, chunk: &Bytes, model: Option<&str>) {
-        let text = String::from_utf8_lossy(chunk);
-        for line in text.lines() {
+    /// SSE chunk 逐行解析：跨 chunk 缓冲未完成的 data: 行（TCP 分片可能切断行尾），
+    /// 完整行才解析，避免 usage 事件被切开时漏记
+    fn parse_stream_chunk(&self, chunk: &Bytes, model: Option<&str>, line_buf: &mut String) {
+        line_buf.push_str(&String::from_utf8_lossy(chunk));
+        drain_sse_lines(line_buf, |line| {
+            let line = line.trim();
             if !line.starts_with("data:") {
-                continue;
+                return;
             }
             let payload = line[5..].trim();
             if payload.is_empty() || payload == "[DONE]" {
-                continue;
+                return;
             }
             if let Ok(v) = serde_json::from_str::<Value>(payload) {
                 self.extract_and_record(&v, model);
             }
+        });
+        // 防异常流无限增长（正常 SSE 行很短；1MB 上限后丢弃未完成行并告警）
+        if line_buf.len() > 1024 * 1024 {
+            log::warn!("[proxy] SSE 行缓冲超过 1MB，丢弃未完成行");
+            line_buf.clear();
         }
     }
 
@@ -493,5 +493,56 @@ impl GoProxyInner {
                 ..Default::default()
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::http::Request;
+
+    fn parts_with(headers: &[(&str, &str)]) -> hyper::http::request::Parts {
+        let mut req = Request::builder().uri("/v1/chat/completions");
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        req.body(()).unwrap().into_parts().0
+    }
+
+    #[test]
+    fn proxy_auth_requires_token() {
+        assert!(!auth_ok("secret", &parts_with(&[])), "无 token 应拒绝");
+        assert!(!auth_ok("secret", &parts_with(&[("x-proxy-token", "wrong")])), "错误 token 应拒绝");
+        assert!(auth_ok("secret", &parts_with(&[("x-proxy-token", "secret")])), "正确 token 应通过");
+    }
+
+    #[test]
+    fn proxy_auth_rejects_untrusted_origin() {
+        // 恶意网页：即使带正确 token，非受信 Origin 也拒绝
+        assert!(!auth_ok("secret", &parts_with(&[
+            ("x-proxy-token", "secret"),
+            ("origin", "http://evil.com"),
+        ])));
+        // 本应用 webview 的 Origin 允许
+        assert!(auth_ok("secret", &parts_with(&[
+            ("x-proxy-token", "secret"),
+            ("origin", "http://ipc.localhost"),
+        ])));
+    }
+
+    #[test]
+    fn sse_line_buffer_reassembles_split_data_line() {
+        // 模拟 usage 的 data: 行被 TCP 分片切成两半：半截行留在缓冲，补全后恰好取出一行
+        let mut buf = String::new();
+        let mut lines: Vec<String> = Vec::new();
+        buf.push_str(r#"data: {"model":"m1","usage":{"total_tokens""#);
+        drain_sse_lines(&mut buf, |l| lines.push(l.to_string()));
+        assert!(lines.is_empty(), "无换行符时不应取出任何行");
+        assert!(!buf.is_empty(), "半截行应保留在缓冲中");
+        buf.push_str(": 42,\"input_tokens\":10,\"output_tokens\":32}}\n");
+        drain_sse_lines(&mut buf, |l| lines.push(l.to_string()));
+        assert_eq!(lines.len(), 1, "跨 chunk 的 data 行应恰好组成一行");
+        assert!(lines[0].starts_with(r#"data: {"model":"m1""#));
+        assert!(buf.is_empty(), "完整行取出后缓冲应清空");
     }
 }

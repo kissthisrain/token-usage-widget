@@ -96,7 +96,10 @@ pub async fn refresh_all(state: State<'_, AppState>) -> Result<OkResult, String>
 
 #[tauri::command]
 pub async fn detect_scan(_state: State<'_, AppState>) -> Result<Vec<Detection>, String> {
-    Ok(crate::detect::scan_all())
+    // 目录扫描 + 全文件解析较重，放到 spawn_blocking，避免阻塞 async worker
+    tauri::async_runtime::spawn_blocking(crate::detect::scan_all)
+        .await
+        .map_err(|e| format!("扫描任务失败: {e}"))
 }
 
 #[tauri::command]

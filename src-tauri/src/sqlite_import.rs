@@ -113,7 +113,9 @@ fn import_blocking(
     let mut imported: u64 = 0;
     for (day, models) in by_day.iter() {
         let calls: u64 = models.values().map(|a| a.calls).sum();
-        history.set_source_day(&source.id, day, models.clone());
+        // 合并而非整体替换：rollout 实时增量可能包含 sqlite 尚未落库的最新请求，
+        // 整体替换会抹掉它们（偏移已消费无法重加）；按模型取 max 双向都安全（幂等）
+        history.merge_source_day(&source.id, day, models.clone());
         imported += calls;
     }
     if imported > 0 {

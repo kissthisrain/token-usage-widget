@@ -24,6 +24,14 @@ pub fn run() {
     for d in &detections {
         println!("{d:?}");
     }
+    let scan_errors: Vec<&str> = detections
+        .iter()
+        .filter_map(|d| d.error.as_deref())
+        .collect();
+    if !scan_errors.is_empty() {
+        println!("!!! 工具探测存在异常：{}", scan_errors.join("；"));
+        std::process::exit(1);
+    }
 
     // 临时源：用探测到的工具补全快照
     let mut temp_sources: Vec<SourceConfig> = Vec::new();

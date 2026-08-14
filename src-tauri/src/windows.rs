@@ -159,9 +159,10 @@ impl WindowMgr {
             let _ = win.set_always_on_top(true);
         }
 
-        // 位置变化 → 持久化 windowBounds（逻辑像素，与 Electron 的 getBounds 口径一致）
+        // 位置变化 → 内存即时更新 + 防抖写盘（500ms 无新移动才保存，拖动时避免高频全量写盘）
         let cfg_store = self.config.clone();
         let win_for_event = win.clone();
+        let save_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
         win.on_window_event(move |event| {
             if let tauri::WindowEvent::Moved(pos) = event {
                 let scale = win_for_event.scale_factor().unwrap_or(1.0);
@@ -169,7 +170,16 @@ impl WindowMgr {
                 let mut c = cfg_store.get();
                 c.window_bounds = Some(WindowBounds { x: Some(x), y: Some(y) });
                 *cfg_store.data.lock().unwrap() = c;
-                cfg_store.save();
+                save_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let gen = save_gen.load(std::sync::atomic::Ordering::SeqCst);
+                let store = cfg_store.clone();
+                let save_gen2 = save_gen.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if save_gen2.load(std::sync::atomic::Ordering::SeqCst) == gen {
+                        store.save();
+                    }
+                });
                 // 跨屏高度适配：新屏可用高度小于当前窗口高度时自动缩小
                 // （底部内容靠内部滚动可达；只缩不放，避免 resize 死循环）
                 // 全部用逻辑像素比较与设置；宽度恒为 WIDGET_WIDTH（混合 DPI 下不反推物理宽）

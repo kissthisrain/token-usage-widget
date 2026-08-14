@@ -162,9 +162,18 @@ impl ConfigStore {
 
     /// 读盘 + 默认值合并；sources 为空数组时首启自动写盘（对齐 JS load()）
     pub fn load(&self) -> Config {
-        let loaded: Option<Config> = std::fs::read_to_string(&self.file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok());
+        let loaded: Option<Config> = match std::fs::read_to_string(&self.file) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    // 损坏时备份原文件（含 API Key 等），避免下次 save 静默覆盖丢失
+                    log::warn!("[config] config.json 解析失败（{e}），已备份损坏文件");
+                    crate::history::backup_corrupt(&self.file);
+                    None
+                }
+            },
+            Err(_) => None,
+        };
         let mut cfg = loaded.unwrap_or_default();
         let empty_sources = cfg.sources.is_empty();
         // 一次性迁移：旧「opencode-go」单类型拆分为「官方额度 + 本地代理」两个独立源

@@ -154,12 +154,17 @@ function renderQuota(s) {
     const cols = items.map((it) => {
       const pct = it.usedPct != null ? Math.round(it.usedPct) : null;
       const barCls = pct == null ? '' : pct >= 95 ? ' red' : pct >= 70 ? ' amber' : pct >= 40 ? ' violet' : '';
-      // 顶部右侧：已用百分比；无百分比的余额类源回退显示金额
-      const pctText = pct != null ? `${pct}%` : (it.remaining != null ? U.fmtMoney(it.remaining, it.currency) : '');
+      // 顶部右侧：已用百分比；无百分比的余额类源回退显示金额。
+      // partial=true 表示有记录未计费（未知模型/缺价目），加 "~" 提示估算值
+      const partialMark = it.partial ? '~' : '';
+      const pctText = pct != null ? `${partialMark}${pct}%` : (it.remaining != null ? U.fmtMoney(it.remaining, it.currency) : '');
       // 金额信息放 tooltip，行内不展示
-      const tip = it.limit != null
-        ? `限额 ${U.fmtMoney(it.limit, it.currency)}${it.spent != null ? `，已用 ${U.fmtMoney(it.spent, it.currency)}` : ''}`
-        : '';
+      const tipParts = [];
+      if (it.limit != null) {
+        tipParts.push(`限额 ${U.fmtMoney(it.limit, it.currency)}${it.spent != null ? `，已用 ${U.fmtMoney(it.spent, it.currency)}` : ''}`);
+      }
+      if (it.partial) tipParts.push('部分请求未计费（未知模型/未配置价目），数值为估算');
+      const tip = tipParts.join('；');
       return `<div class="quota-col"${tip ? ` title="${U.esc(tip)}"` : ''}>
         <div class="qc-top"><span class="qc-label">${U.esc(it.label || '')}</span><span class="qc-pct">${U.esc(pctText)}</span></div>
         <div class="qc-bar${barCls}"><i style="width:${pct == null ? 0 : pct}%"></i></div>
@@ -492,19 +497,42 @@ async function enableSelectedTools() {
 
 let view = 'main';          // 'mini' | 'main'
 
+/** 取 opencode-go 类配额：优先有数据的官方额度（权威），其次有数据的本地估算，
+ *  避免官方 Cookie 失效后还展示过期的"官方"数值 */
+function quotaInfo(snap) {
+  const qs = ((snap && snap.quota) || []).filter((x) => /opencode-go/.test(x.mode || ''));
+  if (!qs.length) return null;
+  const withItems = qs.filter((x) => x.items && x.items.length);
+  return withItems.find((x) => x.mode === 'opencode-go-official')
+    || withItems[0]
+    || qs.find((x) => x.mode === 'opencode-go-official')
+    || qs[0];
+}
+
 /** 从快照取 opencode-go 某窗口（5h/week/month）的剩余% */
 function quotaItemPct(snap, key) {
-  const q = ((snap && snap.quota) || []).find((x) => /opencode-go/.test(x.mode || ''));
+  const q = quotaInfo(snap);
   const it = q && (q.items || []).find((i) => i.key === key);
   if (!it || it.usedPct == null) return null;
   return Math.max(0, Math.min(100, 100 - it.usedPct));
 }
 
+/** 该窗口是否含未计费记录（估算值，UI 显示 ~ 前缀） */
+function quotaItemPartial(snap, key) {
+  const q = quotaInfo(snap);
+  const it = q && (q.items || []).find((i) => i.key === key);
+  return !!(it && it.partial);
+}
+
 /** 精简界面（图二：5h 大数字+环形进度，下方周/月剩余） */
 function renderMini(snap) {
   const p5 = quotaItemPct(snap, '5h');
+  const p5p = quotaItemPartial(snap, '5h');
   const pw = quotaItemPct(snap, 'week');
+  const pwp = quotaItemPartial(snap, 'week');
   const pm = quotaItemPct(snap, 'month');
+  const pmp = quotaItemPartial(snap, 'month');
+  const mark = (p) => (p ? '~' : '');
   const ring = document.querySelector('.mini-ring');
   const val = document.querySelector('.mini-ring-val');
   const badge = document.querySelector('.mini-badge');
@@ -522,12 +550,12 @@ function renderMini(snap) {
     ring.style.background = `conic-gradient(${color} 0% ${p5}%, rgba(255,255,255,0.15) ${p5}% 100%)`;
     ring.style.boxShadow = `0 0 16px ${color}66, 0 0 40px ${color}2e`;
     val.style.textShadow = `0 0 8px ${color}4d, 0 1px 6px rgba(0,0,0,0.7)`;
-    val.textContent = Math.round(p5) + '%';
+    val.textContent = mark(p5p) + Math.round(p5) + '%';
     badge.textContent = '✓';
     badge.classList.remove('err');
   }
-  if (rows[0]) rows[0].textContent = pw == null ? '--' : Math.round(pw) + '%';
-  if (rows[1]) rows[1].textContent = pm == null ? '--' : Math.round(pm) + '%';
+  if (rows[0]) rows[0].textContent = pw == null ? '--' : mark(pwp) + Math.round(pw) + '%';
+  if (rows[1]) rows[1].textContent = pm == null ? '--' : mark(pmp) + Math.round(pm) + '%';
 }
 
 /** app:dock 事件 → 切换视图 */
@@ -578,8 +606,7 @@ async function init() {
     await refresh();
   }
   startClock();
-  // 滚动条位置更新
-  $('scroll').addEventListener('scroll', () => {});
+  // 滚动条位置更新（占位保留）
 
   // 事件
   document.querySelectorAll('#pills .pill').forEach((p) => {

@@ -19,6 +19,17 @@ pub fn today_key() -> String {
     date_key(now_ms())
 }
 
+/// 今天 00:00 的毫秒时间戳（本地时区）
+pub fn today_start_ms() -> i64 {
+    use chrono::{Datelike, Local, TimeZone};
+    let now = Local::now();
+    Local
+        .with_ymd_and_hms(now.year(), now.month(), now.day(), 0, 0, 0)
+        .single()
+        .map(|d| d.timestamp_millis())
+        .unwrap_or_else(now_ms)
+}
+
 /// 天数（含当天）之前的日期 key
 pub fn days_ago_key(days: i64) -> String {
     date_key(now_ms() - days * 86400000)
@@ -88,7 +99,7 @@ mod tests {
         let k = date_key(ts);
         assert_eq!(k.len(), 10);
         let y = k[0..4].parse::<i32>().unwrap();
-        assert!(y >= 2024 && y <= 2035);
+        assert!((2024..=2035).contains(&y));
     }
 
     #[test]

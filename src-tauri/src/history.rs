@@ -146,6 +146,16 @@ fn default_version() -> u64 {
     1
 }
 
+/// 损坏文件备份：解析失败时保留原文件，防止后续 save 覆盖导致数据永久丢失
+pub(crate) fn backup_corrupt(path: &Path) {
+    if path.exists() {
+        let bak = path.with_extension("json.corrupt");
+        if let Err(e) = std::fs::copy(path, &bak) {
+            log::warn!("[history] 备份损坏文件失败: {e}");
+        }
+    }
+}
+
 /// 归一化记录（addRecords 入参）
 #[derive(Clone, Debug)]
 pub struct RecordIn {
@@ -191,10 +201,18 @@ impl HistoryStore {
         if self.no_persist {
             return;
         }
-        let h: History = std::fs::read_to_string(&self.file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let h: History = match std::fs::read_to_string(&self.file) {
+            Ok(s) => match serde_json::from_str(&s) {
+                Ok(h) => h,
+                Err(e) => {
+                    // 损坏时备份原文件，避免后续 save 静默覆盖丢数据
+                    log::warn!("[history] history.json 解析失败（{e}），已备份损坏文件");
+                    backup_corrupt(&self.file);
+                    History::default()
+                }
+            },
+            Err(_) => History::default(),
+        };
         *self.inner.lock().unwrap() = h;
     }
 
@@ -317,6 +335,55 @@ impl HistoryStore {
         self.save_debounced();
     }
 
+    /// 合并某天某源：按模型取各计数器的最大值（不覆盖已有值）。
+    /// 用于 sqlite 权威回填与实时增量（rollout）混写同一天——两者都覆盖同一批请求，
+    /// sqlite 通常更完整、rollout 能捕获最新未落库的记录，取 max 双向都安全（幂等，不丢数据）
+    pub fn merge_source_day(
+        &self,
+        source_id: &str,
+        day_key: &str,
+        models: BTreeMap<String, DayModel>,
+    ) {
+        {
+            let mut h = self.inner.lock().unwrap();
+            let m = h.days.entry(day_key.to_string()).or_default();
+            let src_map = m.entry(source_id.to_string()).or_default();
+            for (model, dm) in models {
+                let e = src_map.entry(model).or_default();
+                e.tokens = e.tokens.max(dm.tokens);
+                e.input = e.input.max(dm.input);
+                e.output = e.output.max(dm.output);
+                e.cost = e.cost.max(dm.cost);
+                e.calls = e.calls.max(dm.calls);
+            }
+            h.last_updated = now_ms();
+        }
+        self.save_debounced();
+    }
+
+    /// 清除某源全部数据（days 的所有天 + recent 中该源记录）。
+    /// 供自愈/截断重建使用：重建前必须清干净，否则重扫会把旧记录再累加一遍
+    pub fn clear_source_all(&self, source_id: &str) {
+        let mut h = self.inner.lock().unwrap();
+        let mut changed = false;
+        let keys: Vec<String> = h.days.keys().cloned().collect();
+        for k in keys {
+            if let Some(day) = h.days.get_mut(&k) {
+                if day.remove(source_id).is_some() {
+                    changed = true;
+                }
+            }
+        }
+        let before = h.recent.len();
+        h.recent.retain(|r| r.source_id != source_id);
+        if h.recent.len() != before {
+            changed = true;
+        }
+        if changed {
+            h.last_updated = now_ms();
+        }
+    }
+
     pub fn set_quota(&self, source_id: &str, info: QuotaInfo) {
         {
             let mut h = self.inner.lock().unwrap();
@@ -372,6 +439,7 @@ impl HistoryStore {
     ) -> AggregateResult {
         let h = self.inner.lock().unwrap();
         let keys: Vec<String> = h.days.keys().cloned().collect();
+        let now = now_ms();
         let today = today_key();
         let month_start = days_ago_key(29);
         let in_range = |k: &String| -> bool {
@@ -497,9 +565,17 @@ impl HistoryStore {
             tokens += mm.tokens;
             cost += mm.cost;
         }
-        // recent 中 cost 为 null 的记录 → costPartial
+        // recent 中 cost 为 null 的记录 → costPartial（只统计当前筛选范围内，
+        // 避免 35 天前的一笔无价记录让 DAY 视图也显示"~"）
+        let range_cutoff: i64 = if range == "day" {
+            crate::util::today_start_ms()
+        } else if range == "month" {
+            now - 29 * 86400000
+        } else {
+            0
+        };
         for r in &h.recent {
-            if r.cost.is_none() && ids.contains(&r.source_id) {
+            if r.cost.is_none() && ids.contains(&r.source_id) && r.ts >= range_cutoff {
                 cost_partial = true;
             }
         }
@@ -577,7 +653,6 @@ impl HistoryStore {
         let h = self.inner.lock().unwrap();
         let month_key = &today_key()[..7];
         let mut spent: f64 = 0.0;
-        let partial = false;
         for (k, day) in &h.days {
             if !k.starts_with(month_key) {
                 continue;
@@ -588,26 +663,15 @@ impl HistoryStore {
                 }
             }
         }
-        (spent, partial)
-    }
-
-    /// 供自愈/重扫使用：删除某源从 cutoff 起的 days 数据
-    pub fn clear_source_days_from(&self, source_id: &str, cutoff: &str) {
-        let mut h = self.inner.lock().unwrap();
-        let mut changed = false;
-        let keys: Vec<String> = h.days.keys().cloned().collect();
-        for k in keys {
-            if k.as_str() >= cutoff {
-                if let Some(day) = h.days.get_mut(&k) {
-                    if day.remove(source_id).is_some() {
-                        changed = true;
-                    }
-                }
+        // 月窗口是否含未计费记录（未知模型/无价目）——recent 保留 35 天覆盖整个自然月
+        let mut partial = false;
+        for r in &h.recent {
+            if r.source_id == source_id && r.cost.is_none() && date_key(r.ts).starts_with(month_key) {
+                partial = true;
+                break;
             }
         }
-        if changed {
-            h.last_updated = now_ms();
-        }
+        (spent, partial)
     }
 
     pub fn reset_file_offsets(&self, source_id: &str, files: &[String]) {

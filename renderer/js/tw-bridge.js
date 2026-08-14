@@ -17,7 +17,6 @@
     getSnapshot: (opts) => invoke('get_snapshot', { opts: opts || {} }),
     onUpdate: (cb) => subscribe('data:update', cb),
     onOpacity: (cb) => subscribe('app:opacity', cb),
-    onFocus: (cb) => subscribe('app:focus', cb),
     onDock: (cb) => subscribe('app:dock', cb),
     showMini: () => invoke('win_show_mini'),
     showMain: () => invoke('win_show_main'),
