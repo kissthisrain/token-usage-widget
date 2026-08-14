@@ -187,6 +187,19 @@ fn parse_human_duration(text: &str) -> Option<i64> {
 // 控制台页面窗口名 → 限额 key
 const SSR_NAMES: [(&str, &str); 3] = [("rollingUsage", "5h"), ("weeklyUsage", "week"), ("monthlyUsage", "month")];
 
+/// 定位某窗口在水合数据中的起始位置（返回数据对象 `{` 之后的偏移）：
+/// 优先匹配 `name:$R[n]={...}` 赋值，其次匹配 `name:{...}` 内联对象；
+/// 刻意避开 React 初始 state 里的 null 占位（如页面中先出现的 `monthlyUsage:null,...`），
+/// 否则会解析到错误片段、丢掉该窗口（旧实现下 month 经常缺失的根因）。
+fn ssr_segment_start(text: &str, name: &str) -> Option<usize> {
+    let assigned = regex::Regex::new(&format!(r#"{name}:\$R\[\d+\]="#)).ok()?;
+    if let Some(m) = assigned.find(text) {
+        return Some(m.end());
+    }
+    let inline = regex::Regex::new(&format!(r#"{name}:\s*\{{"#)).ok()?;
+    inline.find(text).map(|m| m.end())
+}
+
 #[derive(Clone, Debug, Default)]
 struct UsageWin {
     used_pct: Option<f64>,
@@ -207,8 +220,9 @@ static RE_RESET_SEC: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r#"resetInSec["']?\s*[:=]\s*["']?(\d+)"#).unwrap());
 static RE_SLOT_LABEL: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r#"data-slot="usage-label">([^<]*)"#).unwrap());
+// 值带 % 后缀、且可能被 React 流式注释（<!--$-->…<!--/-->）包裹，直接捕获数字
 static RE_SLOT_VALUE: Lazy<regex::Regex> =
-    Lazy::new(|| regex::Regex::new(r#"data-slot="usage-value">([^<]*)"#).unwrap());
+    Lazy::new(|| regex::Regex::new(r#"data-slot="usage-value">([\d.]+)"#).unwrap());
 static RE_SLOT_RESET: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r#"data-slot="reset-time">([^<]*)"#).unwrap());
 static RE_ROLLING: Lazy<regex::Regex> =
@@ -219,14 +233,18 @@ static RE_MONTHLY: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"(?i)monthly|month|每月").unwrap());
 
 /// 从控制台页面 HTML 提取三个窗口的用量百分比与重置时间
+///
 /// 两种内嵌格式：
 ///  1) SSR 水合 JSON：rollingUsage:$R[n]={usagePercent:23.5,resetInSec:13320}
 ///  2) data-slot HTML：<div data-slot="usage-item">...
+///
+/// 注意：页面里同名窗口名可能先以 null 占位（React 初始 state）出现，
+/// 必须按水合赋值定位，否则会解析到错误片段导致该窗口缺失。
 fn extract_usage(html: &str) -> std::collections::HashMap<String, UsageWin> {
     let text = String::from(html);
     let mut out: std::collections::HashMap<String, UsageWin> = std::collections::HashMap::new();
     for (name, key) in SSR_NAMES {
-        let Some(idx) = text.find(name) else { continue };
+        let Some(idx) = ssr_segment_start(&text, name) else { continue };
         let seg = &text[idx..(idx + 400).min(text.len())];
         let pct = RE_USAGE_PCT
             .captures(seg)
@@ -251,19 +269,21 @@ fn extract_usage(html: &str) -> std::collections::HashMap<String, UsageWin> {
             .split("data-slot=\"usage-item\"")
             .skip(1)
             .map(|b| {
+                // React 流式渲染会在文本周围插入 <!--$-->…<!--/--> 注释，先剥掉再提取
+                let plain = b.replace("<!--$-->", "").replace("<!--/-->", "");
                 let label = RE_SLOT_LABEL
-                    .captures(b)
+                    .captures(&plain)
                     .map(|c| c[1].to_string())
                     .unwrap_or_default();
                 let value = RE_SLOT_VALUE
-                    .captures(b)
+                    .captures(&plain)
                     .map(|c| c[1].to_string())
                     .unwrap_or_default();
                 let reset = RE_SLOT_RESET
-                    .captures(b)
+                    .captures(&plain)
                     .map(|c| c[1].to_string())
                     .or_else(|| {
-                        if b.contains("data-slot=\"reset-now\"") {
+                        if plain.contains("data-slot=\"reset-now\"") {
                             Some("0 seconds".to_string())
                         } else {
                             None
@@ -482,4 +502,47 @@ pub async fn test(source: &SourceConfig, _history: &HistoryStore) -> serde_json:
     ));
     msgs.push("配置「工作区 ID + Auth Cookie」可获取官方剩余用量（见下方字段）".to_string());
     serde_json::json!({ "ok": true, "message": msgs.join("；") })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_usage_skips_null_placeholder_and_parses_month() {
+        // 模拟真实页面结构：React 初始 state 里先出现 monthlyUsage:null 占位（与真实
+        // 水合数据间距 >400 字符），真正的水合数据在后面。旧实现 text.find 命中占位、
+        // 400 字符窗口内扫不到 usagePercent，month 会整项丢失；新实现按 $R[n] 赋值精确定位。
+        let filler = "x".repeat(500);
+        let html = format!(
+            r#"<script>window.__q={{monthlyLimit:null,monthlyUsage:null,{filler}timeMonthlyUsageUpdated:null}};var q={{mine:!0,rollingUsage:$R[33]={{status:"ok",resetInSec:16632,usagePercent:0}},weeklyUsage:$R[34]={{status:"ok",resetInSec:233566,usagePercent:6}},monthlyUsage:$R[35]={{status:"ok",resetInSec:1795452,usagePercent:5}}}};</script>"#
+        );
+        let u = extract_usage(&html);
+        assert_eq!(u.len(), 3, "三个窗口都应解析出来");
+        assert_eq!(u["5h"].used_pct, Some(0.0));
+        assert_eq!(u["week"].used_pct, Some(6.0));
+        assert_eq!(u["month"].used_pct, Some(5.0));
+        assert!(u["month"].resets_at.is_some(), "month 应有重置时间");
+    }
+
+    #[test]
+    fn extract_usage_accepts_inline_object_form() {
+        // 无 $R 水合引用时的内联对象形式（name:{...}），同样应避开 null 占位
+        let html = r#"<script>window.__q={monthlyUsage:null};var q={rollingUsage:{status:"ok",resetInSec:16632,usagePercent:0},weeklyUsage:{status:"ok",resetInSec:233566,usagePercent:6},monthlyUsage:{status:"ok",resetInSec:1795452,usagePercent:5}};</script>"#;
+        let u = extract_usage(html);
+        assert_eq!(u.len(), 3);
+        assert_eq!(u["month"].used_pct, Some(5.0));
+    }
+
+    #[test]
+    fn extract_usage_slot_fallback_strips_react_comments() {
+        // data-slot 兜底：值与重置文本被 React 流式注释（<!--$-->…<!--/-->）包裹、值带 % 后缀
+        let html = r#"<div data-slot="usage-item"><div data-slot="usage-header"><span data-slot="usage-label">Rolling Usage</span><span data-slot="usage-value"><!--$-->0<!--/-->%</span></div><div data-slot="progress"><div data-slot="progress-bar" style="width:0%"></div></div><span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->4 hours 37 minutes<!--/--></span></div><!--/--><div data-slot="usage-item"><span data-slot="usage-label">Weekly Usage</span><span data-slot="usage-value"><!--$-->6<!--/-->%</span><span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->2 days 16 hours<!--/--></span></div><div data-slot="usage-item"><span data-slot="usage-label">Monthly Usage</span><span data-slot="usage-value"><!--$-->5<!--/-->%</span><span data-slot="reset-time"><!--$-->Resets in<!--/--> <!--$-->20 days 18 hours<!--/--></span></div>"#;
+        let u = extract_usage(html);
+        assert_eq!(u.len(), 3, "data-slot 兜底应解析出全部三个窗口");
+        assert_eq!(u["5h"].used_pct, Some(0.0));
+        assert_eq!(u["week"].used_pct, Some(6.0));
+        assert_eq!(u["month"].used_pct, Some(5.0));
+        assert!(u["5h"].resets_at.is_some(), "重置文本应能解析出时长");
+    }
 }
