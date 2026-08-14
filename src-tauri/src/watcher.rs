@@ -8,7 +8,8 @@ use crate::config::SourceConfig;
 use crate::events::DataUpdate;
 use crate::history::{HistoryStore, QuotaInfo, QuotaItem, RecordIn};
 use crate::sources::local_logs::{
-    extract_json_record, list_jsonl_files, parse_codex_file, scan_params_for_source, ScanParams,
+    extract_json_record, list_jsonl_files, parse_codex_file, parse_dsh_file, scan_params_for_source,
+    ScanParams,
 };
 use crate::sqlite_import::import_zcode_history;
 use crate::util::{now_ms, parse_ts};
@@ -387,6 +388,8 @@ impl WatcherInner {
         let files = list_jsonl_files(&dir, params.recursive, &params.pattern);
         let file_strs: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
         self.history.reset_file_offsets(&src.id, &file_strs);
+        // dsh 的事件计数同样重置（全量重扫重新计数，防旧计数导致漏计）
+        self.history.reset_dsh_seen(&src.id);
         // 必须清干净再重扫：旧记录若保留，重扫会把它们再累加一遍（双倍计数）
         self.history.clear_source_all(&src.id);
         for f in &files {
@@ -518,6 +521,49 @@ impl WatcherInner {
                     },
                 );
             }
+            self.history.set_file_offset(&src.id, &file.to_string_lossy(), size);
+            self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+            return;
+        }
+
+        // dsh：zstd 压缩 JSONL，无法按字节偏移增量读 → 全量解压重读，
+        // 用「已消费事件数」取尾部增量（文件只追加、新事件总在尾部），防重启/重复事件双计
+        if params.format == "dsh" {
+            if size > MAX_FILE_BYTES {
+                // 跳过超大文件并标记消费：避免每次轮询重试 + 触发反复自愈（同 codex 路径）
+                log::warn!(
+                    "[watcher] {} 文件超过 {}MB 跳过解析（已标记消费，新追加内容仍会统计）：{}",
+                    src.name,
+                    MAX_FILE_BYTES / 1024 / 1024,
+                    file.display()
+                );
+                self.history.set_file_offset(&src.id, &file.to_string_lossy(), size);
+                self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+                return;
+            }
+            let Some(records) = parse_dsh_file(file) else {
+                // 解压失败（写入中/损坏）：只刷新 last_advance 防自愈误触发，
+                // 不推进 seen/offset —— 否则下次成功解析会整文件重加 → 双计
+                self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
+                return;
+            };
+            let total = records.len() as u64;
+            let seen = self.history.get_dsh_seen(&src.id, &file.to_string_lossy());
+            let new_count = total.saturating_sub(seen);
+            if new_count > 0 {
+                let start = records.len() - new_count as usize;
+                let new_records: Vec<RecordIn> = records[start..].to_vec();
+                self.history.add_records(&src.id, new_records, true);
+                let _ = self.app.emit(
+                    "data:update",
+                    DataUpdate {
+                        source_id: Some(src.id.clone()),
+                        count: Some(new_count),
+                        ..Default::default()
+                    },
+                );
+            }
+            self.history.set_dsh_seen(&src.id, &file.to_string_lossy(), total);
             self.history.set_file_offset(&src.id, &file.to_string_lossy(), size);
             self.last_advance.lock().unwrap().insert(src.id.clone(), now_ms());
             return;

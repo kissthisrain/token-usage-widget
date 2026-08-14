@@ -30,6 +30,13 @@ pub fn scan_params_for_source(src: &SourceConfig) -> ScanParams {
             pattern: Regex::new(r"^model-io-.*\.jsonl$").unwrap(),
             format: "zcode".to_string(),
         }
+    } else if tool == "dsh" {
+        // DeepSeek Harness：~/.dsh/sessions/<工作区>/session-<uuid>/session.jsonl.zstd
+        ScanParams {
+            recursive: true,
+            pattern: Regex::new(r"^session\.jsonl\.zstd$").unwrap(),
+            format: "dsh".to_string(),
+        }
     } else {
         let pat = src.file_pattern.clone().unwrap_or_else(|| r"\.jsonl$".to_string());
         ScanParams {
@@ -138,6 +145,82 @@ fn normalize_rate_limits(rl: &Value, ts: i64) -> Option<QuotaItem> {
     })
 }
 
+// ---------- dsh（DeepSeek Harness）格式 ----------
+// 会话日志 session.jsonl.zstd 是 zstd 压缩 JSONL，每行一个事件；只解析 assistant/message 的 usage。
+// 注意：zstd 不支持按字节偏移增量读，调用方（watcher）采用「全量解压重读 + 已消费事件数去重」
+//（文件只追加，新事件总在尾部），本函数只负责解压 + 提取记录，不含去重逻辑。
+
+/// 解压后大小上限（防异常压缩流膨胀占满内存；正常会话解压后 ≤4MB）
+const MAX_DSH_DECOMPRESSED: u64 = 256 * 1024 * 1024;
+
+/// 解析单个 assistant/message 事件 → RecordIn；非目标事件/字段缺失返回 None（全容错）
+fn parse_dsh_record(r: &Value) -> Option<RecordIn> {
+    let data = r.get("data")?;
+    let usage = data.get("usage")?;
+    let input = usage.get("inputTokens").and_then(Value::as_f64).unwrap_or(0.0);
+    let output = usage.get("outputTokens").and_then(Value::as_f64).unwrap_or(0.0);
+    let cache_read = usage.get("cacheReadTokens").and_then(Value::as_f64).unwrap_or(0.0);
+    // 口径（与 ZCode 不同，dsh 专属）：total = input + output + cacheRead。
+    // dsh 每次请求都会重放整段会话缓存上下文（cacheRead 占绝对大头，实测约为
+    // input+output 的 100 倍），按"实际处理/计费 token"统计才反映真实用量
+    let total = input + output + cache_read;
+    if total <= 0.0 || !total.is_finite() {
+        return None;
+    }
+    let src = data.pointer("/message/source");
+    let model = src.and_then(|s| s.get("model")).and_then(Value::as_str).map(String::from);
+    let provider = src.and_then(|s| s.get("provider")).and_then(Value::as_str).map(String::from);
+    Some(RecordIn {
+        ts: crate::util::parse_ts(&r["time"]),
+        model,
+        provider,
+        input: Some(input),
+        output: Some(output),
+        total,
+        cache_read: usage.get("cacheReadTokens").and_then(Value::as_f64),
+        cost: None,
+    })
+}
+
+/// 解压并解析 dsh 会话文件：zstd 解码 → 逐行 JSON → 仅取 assistant/message 的 usage。
+/// 返回 None 表示**解压失败**（文件写入中/损坏/超限）——调用方必须不推进 seen/offset，
+/// 下轮轮询自然重试；若返回空 Vec 则是"解压成功但无有效记录"，二者语义不同。
+/// 不 panic、不影响其他源
+pub fn parse_dsh_file(file_path: &Path) -> Option<Vec<RecordIn>> {
+    let f = match std::fs::File::open(file_path) {
+        Ok(f) => f,
+        Err(_) => return None,
+    };
+    let mut text = String::new();
+    let ok = (|| -> std::io::Result<bool> {
+        use std::io::Read;
+        let dec = zstd::stream::read::Decoder::new(f)?;
+        let mut reader = dec.take(MAX_DSH_DECOMPRESSED + 1);
+        let n = reader.read_to_string(&mut text)?;
+        Ok(n <= MAX_DSH_DECOMPRESSED as usize)
+    })();
+    if !ok.unwrap_or(false) {
+        return None;
+    }
+    let mut records = Vec::new();
+    for line in text.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let r: Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue, // 写入中/损坏行跳过（解压整体成功，个别坏行忽略）
+        };
+        if r.get("type").and_then(Value::as_str) != Some("assistant/message") {
+            continue;
+        }
+        if let Some(rec) = parse_dsh_record(&r) {
+            records.push(rec);
+        }
+    }
+    Some(records)
+}
+
 // ---------- Codex 格式（需按时间顺序全文件解析） ----------
 // 返回的 u64 是每条记录所在行「内容末尾」的字节偏移（不含换行符）：
 // watcher 用它做水位线去重——只累加偏移超出已消费 offset 的增量记录，
@@ -221,11 +304,14 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<(RecordIn, u64)>, Vec<QuotaIte
     (records, rate_limits)
 }
 
-/// 通用入口：zcode / 自定义 → 逐行 zcode 解析；codex → 全文件有序解析
+/// 通用入口：zcode / 自定义 → 逐行 zcode 解析；codex → 全文件有序解析；dsh → zstd 解压解析
 pub fn parse_file(file_path: &Path, format: &str) -> (Vec<RecordIn>, Vec<QuotaItem>) {
     if format == "codex" {
         let (records, rate_limits) = parse_codex_file(file_path);
         return (records.into_iter().map(|(r, _)| r).collect(), rate_limits);
+    }
+    if format == "dsh" {
+        return (parse_dsh_file(file_path).unwrap_or_default(), Vec::new());
     }
     let text = match std::fs::read_to_string(file_path) {
         Ok(t) => t,
@@ -377,6 +463,78 @@ mod tests {
             .collect();
         assert_eq!(delta.len(), 2, "水位线之后应只有 2 条新增记录");
         assert_eq!(delta.iter().map(|r| r.total as i64).sum::<i64>(), 700);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dsh_parses_assistant_message_only() {
+        let dir = std::env::temp_dir().join(format!(
+            "usage-test-dsh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("session.jsonl.zstd");
+        {
+            let f = std::fs::File::create(&file).unwrap();
+            let mut enc = zstd::stream::write::Encoder::new(f, 0).unwrap();
+            // assistant/message：完整 usage
+            let msg = serde_json::json!({
+                "type": "assistant/message",
+                "seq": 1,
+                "time": 1754793600000i64,
+                "data": {
+                    "message": {
+                        "source": { "kind": "model", "provider": "opencode-go", "model": "deepseek-v4-flash" }
+                    },
+                    "usage": { "inputTokens": 8057, "outputTokens": 211, "cacheReadTokens": 8192 }
+                }
+            });
+            writeln!(enc, "{}", msg).unwrap();
+            // 非 assistant/message 事件（chunk 类）应被跳过
+            let chunk = serde_json::json!({
+                "type": "reasoning-chunks",
+                "data": { "usage": { "inputTokens": 1, "outputTokens": 2 } }
+            });
+            writeln!(enc, "{}", chunk).unwrap();
+            // usage 缺失的 assistant/message 也应跳过
+            let no_usage = serde_json::json!({ "type": "assistant/message", "time": 1754793600001i64, "data": { "message": {} } });
+            writeln!(enc, "{}", no_usage).unwrap();
+            // 纯缓存命中请求（input+output=0 但 cacheRead>0）：按 dsh 口径应计入 total
+            let cache_only = serde_json::json!({
+                "type": "assistant/message",
+                "time": 1754793600002i64,
+                "data": {
+                    "message": { "source": { "kind": "model", "provider": "opencode-go", "model": "deepseek-v4-flash" } },
+                    "usage": { "inputTokens": 0, "outputTokens": 0, "cacheReadTokens": 1000 }
+                }
+            });
+            writeln!(enc, "{}", cache_only).unwrap();
+            enc.finish().unwrap();
+        }
+        let records = parse_dsh_file(&file).unwrap();
+        assert_eq!(records.len(), 2, "应解析出 2 条：完整 usage + 纯缓存命中");
+        let r = &records[0];
+        assert_eq!(r.ts, Some(1754793600000));
+        assert_eq!(r.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(r.provider.as_deref(), Some("opencode-go"));
+        assert_eq!(r.input, Some(8057.0));
+        assert_eq!(r.output, Some(211.0));
+        // dsh 口径：total = input + output + cacheRead
+        assert_eq!(r.total, 8057.0 + 211.0 + 8192.0);
+        assert_eq!(r.cache_read, Some(8192.0));
+        assert_eq!(r.cost, None);
+        let r2 = &records[1];
+        assert_eq!(r2.total, 1000.0, "纯缓存命中也计入 total");
+        assert_eq!(r2.input, Some(0.0));
+        assert_eq!(r2.output, Some(0.0));
+
+        // 损坏文件（非 zstd）→ None（解压失败），不 panic
+        std::fs::write(&file, b"not a zstd stream").unwrap();
+        assert!(parse_dsh_file(&file).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

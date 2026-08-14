@@ -34,6 +34,7 @@ rand = "0.8"
 thiserror = "2"
 notify = "6"
 rusqlite = { version = "0.31", features = ["bundled"] }
+zstd = "0.13"
 once_cell = "1"
 log = "0.4"
 env_logger = "0.11"

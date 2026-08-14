@@ -67,6 +67,15 @@ fn profiles() -> Vec<Profile> {
             desc: "Codex CLI 会话记录（含历史用量与周配额）",
         },
         Profile {
+            id: "dsh",
+            name: "DSH",
+            tool: "dsh",
+            paths: vec![home.join(".dsh").join("sessions")],
+            recursive: true,
+            live: true,
+            desc: "DeepSeek Harness 会话记录（实时写入）",
+        },
+        Profile {
             id: "opencode",
             name: "OpenCode CLI",
             tool: "zcode",

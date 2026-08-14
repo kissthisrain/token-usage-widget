@@ -138,6 +138,11 @@ pub struct History {
     pub quota: BTreeMap<String, QuotaInfo>,
     #[serde(default)]
     pub file_offsets: BTreeMap<String, BTreeMap<String, u64>>,
+    /// dsh 已消费事件数：[sourceId -> [filePath -> assistant/message 事件数]]。
+    /// dsh 为 zstd 压缩 JSONL，无法按字节偏移增量读，全量重读后用该计数取尾部增量
+    ///（文件只追加、新事件总在尾部），重启不重复统计；截断重建时整源重置
+    #[serde(default)]
+    pub dsh_seen: BTreeMap<String, BTreeMap<String, u64>>,
     #[serde(default)]
     pub last_updated: i64,
 }
@@ -402,6 +407,7 @@ impl HistoryStore {
             h.recent.clear();
             h.quota.clear();
             h.file_offsets.clear();
+            h.dsh_seen.clear();
             h.last_updated = 0;
         }
         self.save_now();
@@ -426,6 +432,37 @@ impl HistoryStore {
             .entry(source_id.to_string())
             .or_default()
             .insert(file.to_string(), bytes);
+    }
+
+    /// dsh：某文件已消费的 assistant/message 事件数（默认 0）
+    pub fn get_dsh_seen(&self, source_id: &str, file: &str) -> u64 {
+        self.inner
+            .lock()
+            .unwrap()
+            .dsh_seen
+            .get(source_id)
+            .and_then(|m| m.get(file))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// dsh：记录某文件已消费的事件总数（全量重读后调用；与 file_offsets 同随防抖写盘持久化）
+    pub fn set_dsh_seen(&self, source_id: &str, file: &str, count: u64) {
+        self.inner
+            .lock()
+            .unwrap()
+            .dsh_seen
+            .entry(source_id.to_string())
+            .or_default()
+            .insert(file.to_string(), count);
+    }
+
+    /// dsh：截断/重建时整源重置计数（下次全量重读重新计数）
+    pub fn reset_dsh_seen(&self, source_id: &str) {
+        let mut h = self.inner.lock().unwrap();
+        if h.dsh_seen.remove(source_id).is_some() {
+            h.last_updated = now_ms();
+        }
     }
 
     // ---------- 聚合 ----------

@@ -212,6 +212,7 @@ function providerGlyph(name) {
   if (s.includes('codex')) return '✶';
   if (s.includes('openai')) return '▲';
   if (s.includes('deepseek')) return '◆';
+  if (s.includes('dsh')) return '◆'; // DeepSeek Harness（同品牌字形）
   if (s.includes('claude') || s.includes('anthropic')) return '✦';
   if (s.includes('glm') || s.includes('zhipu')) return '◈';
   if (s.includes('gemini') || s.includes('google')) return '●';
@@ -480,7 +481,7 @@ async function enableSelectedTools() {
       id: 'src_' + t.id + '_' + Date.now().toString(36),
       type: 'local-logs',
       tool: t.tool,
-      name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id,
+      name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id,
       path: t.path,
       enabled: true,
       displayOrder: cfg.sources.length,
