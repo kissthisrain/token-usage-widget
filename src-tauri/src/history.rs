@@ -342,7 +342,9 @@ impl HistoryStore {
 
     /// 合并某天某源：按模型取各计数器的最大值（不覆盖已有值）。
     /// 用于 sqlite 权威回填与实时增量（rollout）混写同一天——两者都覆盖同一批请求，
-    /// sqlite 通常更完整、rollout 能捕获最新未落库的记录，取 max 双向都安全（幂等，不丢数据）
+    /// sqlite 通常更完整、rollout 能捕获最新未落库的记录，取 max 双向都安全（幂等，不丢数据）。
+    /// 注意：max 只增不减，rollout 侧累计出虚高值后 sqlite 回填无法收敛；
+    /// 新代码改用 set_source_day + recover_source_day_delta（sqlite 为准）。
     pub fn merge_source_day(
         &self,
         source_id: &str,
@@ -363,6 +365,59 @@ impl HistoryStore {
             }
             h.last_updated = now_ms();
         }
+        self.save_debounced();
+    }
+
+    /// sqlite 权威回填后的增量补齐：set_source_day 按天整体替换会抹掉 sqlite 尚未
+    /// 落库的最新记录（rollout 偏移已消费、无法重加），因此从 recent 找回「超过该天
+    /// sqlite 最新 completed_at」的记录重新累加回 days（只写 days，不重复写入 recent）。
+    /// day_cutoffs：天 → 该天 sqlite 最大 completed_at(ms)；只处理出现在其中的天。
+    /// 口径：recent 与 sqlite 侧同口径（含缓存 raw 累计），只回收超出权威时点的新记录，幂等收敛。
+    pub fn recover_source_day_delta(&self, source_id: &str, day_cutoffs: &BTreeMap<String, i64>) {
+        if day_cutoffs.is_empty() {
+            return;
+        }
+        // 先筛选出待回收记录（recent 可 Clone），再在锁内更新 days：
+        // 不能在迭代 recent 的同时可变借用 days（借用冲突）
+        let mut h = self.inner.lock().unwrap();
+        let candidates: Vec<RecentRecord> = h
+            .recent
+            .iter()
+            .filter(|r| {
+                r.source_id == source_id
+                    && day_cutoffs
+                        .get(&date_key(r.ts))
+                        .is_some_and(|max_ts| r.ts > *max_ts)
+            })
+            .cloned()
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let now = now_ms();
+        for r in candidates {
+            let day = date_key(r.ts);
+            let model = r.model;
+            let a = h
+                .days
+                .entry(day)
+                .or_default()
+                .entry(source_id.to_string())
+                .or_default()
+                .entry(model)
+                .or_default();
+            a.tokens += r.total;
+            a.input += r.input;
+            a.output += r.output;
+            if let Some(c) = r.cost {
+                if c.is_finite() {
+                    a.cost += c;
+                }
+            }
+            a.calls += 1;
+        }
+        h.last_updated = now;
+        drop(h);
         self.save_debounced();
     }
 

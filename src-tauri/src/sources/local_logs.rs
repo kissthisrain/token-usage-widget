@@ -48,7 +48,10 @@ pub fn scan_params_for_source(src: &SourceConfig) -> ScanParams {
 }
 
 // ---------- ZCode 格式 ----------
-fn parse_zcode_record(r: &Value) -> Option<RecordIn> {
+/// 解析 ZCode 单条 model_io 记录 → RecordIn。
+/// 统计口径与 zcode 界面一致：total = totalTokens（inputTokens 已含缓存命中 token，
+/// 界面同样按含缓存累计）；input/output 存原始值。cache_read 保留供诊断/可选换算。
+pub fn parse_zcode_record(r: &Value) -> Option<RecordIn> {
     if !r.is_object() {
         return None;
     }
@@ -74,7 +77,10 @@ fn parse_zcode_record(r: &Value) -> Option<RecordIn> {
         .and_then(|m| m.get("providerId"))
         .and_then(Value::as_str)
         .map(|s| s.to_string());
-    let num = |k1: &str, k2: &str| u.and_then(|x| x.get(k1).or_else(|| x.get(k2))).and_then(Value::as_f64);
+    let num = |k1: &str, k2: &str| {
+        u.and_then(|x| x.get(k1).or_else(|| x.get(k2)))
+            .and_then(Value::as_f64)
+    };
     Some(RecordIn {
         ts,
         model,
@@ -160,9 +166,9 @@ fn parse_dsh_record(r: &Value) -> Option<RecordIn> {
     let input = usage.get("inputTokens").and_then(Value::as_f64).unwrap_or(0.0);
     let output = usage.get("outputTokens").and_then(Value::as_f64).unwrap_or(0.0);
     let cache_read = usage.get("cacheReadTokens").and_then(Value::as_f64).unwrap_or(0.0);
-    // 口径（与 ZCode 不同，dsh 专属）：total = input + output + cacheRead。
-    // dsh 每次请求都会重放整段会话缓存上下文（cacheRead 占绝对大头，实测约为
-    // input+output 的 100 倍），按"实际处理/计费 token"统计才反映真实用量
+    // 口径与各客户端界面一致：total = input + output + cacheRead（缓存命中同样计入消耗量）。
+    // dsh 每次请求都会重放整段会话缓存上下文（cacheRead 占大头），
+    // 与 zcode 界面"含缓存 raw 累计"同口径
     let total = input + output + cache_read;
     if total <= 0.0 || !total.is_finite() {
         return None;
@@ -413,7 +419,8 @@ mod tests {
                 "type": "token_count",
                 "info": {
                     "last_token_usage": {
-                        "input_tokens": 10,
+                        // 真实 codex 记录：total_tokens = input_tokens + output_tokens（无缓存时）
+                        "input_tokens": total - 20,
                         "output_tokens": 20,
                         "total_tokens": total
                     }
@@ -467,6 +474,52 @@ mod tests {
     }
 
     #[test]
+    fn zcode_parse_counts_raw_total_including_cache() {
+        // 真实样本结构：totalTokens 含缓存命中，与 zcode 界面口径一致（含缓存累计）
+        let line = serde_json::json!({
+            "type": "model_io",
+            "completedAt": "2026-08-17T05:35:12.903Z",
+            "model": {"modelId": "deepseek-v4-flash", "providerId": "p1", "role": "lite"},
+            "response": {"usage": {
+                "inputTokens": 32298.0, "outputTokens": 630.0,
+                "totalTokens": 32928.0, "cacheReadTokens": 30720.0, "cacheWriteTokens": 0.0
+            }}
+        });
+        let rec = parse_zcode_record(&line).expect("应解析出记录");
+        // 与 zcode 界面一致：total = totalTokens（含缓存），input/output 存原始值
+        assert_eq!(rec.total, 32928.0);
+        assert_eq!(rec.input, Some(32298.0));
+        assert_eq!(rec.output, Some(630.0));
+        assert_eq!(rec.cache_read, Some(30720.0));
+        assert_eq!(rec.model.as_deref(), Some("deepseek-v4-flash"));
+        assert_eq!(rec.ts, Some(1786944912903));
+
+        // 纯缓存命中请求：totalTokens > 0 即计入（与界面一致）
+        let cache_only = serde_json::json!({
+            "type": "model_io",
+            "completedAt": "2026-08-17T06:00:00.000Z",
+            "model": {"modelId": "deepseek-v4-flash"},
+            "response": {"usage": {
+                "inputTokens": 512.0, "outputTokens": 0.0,
+                "totalTokens": 512.0, "cacheReadTokens": 512.0, "cacheWriteTokens": 0.0
+            }}
+        });
+        let rec3 = parse_zcode_record(&cache_only).expect("纯缓存命中也计入");
+        assert_eq!(rec3.total, 512.0);
+
+        // 缺 input/output 字段：total 用 totalTokens
+        let total_only = serde_json::json!({
+            "type": "model_io",
+            "completedAt": "2026-08-17T06:01:00.000Z",
+            "model": {"modelId": "m"},
+            "response": {"usage": {"totalTokens": 1000.0, "cacheReadTokens": 400.0}}
+        });
+        let rec2 = parse_zcode_record(&total_only).expect("total-only 应解析出记录");
+        assert_eq!(rec2.total, 1000.0);
+        assert_eq!(rec2.input, None);
+    }
+
+    #[test]
     fn dsh_parses_assistant_message_only() {
         let dir = std::env::temp_dir().join(format!(
             "usage-test-dsh-{}-{}",
@@ -503,7 +556,7 @@ mod tests {
             // usage 缺失的 assistant/message 也应跳过
             let no_usage = serde_json::json!({ "type": "assistant/message", "time": 1754793600001i64, "data": { "message": {} } });
             writeln!(enc, "{}", no_usage).unwrap();
-            // 纯缓存命中请求（input+output=0 但 cacheRead>0）：按 dsh 口径应计入 total
+            // 纯缓存命中请求（input+output=0 但 cacheRead>0）：按含缓存口径同样计入 total
             let cache_only = serde_json::json!({
                 "type": "assistant/message",
                 "time": 1754793600002i64,
@@ -516,21 +569,20 @@ mod tests {
             enc.finish().unwrap();
         }
         let records = parse_dsh_file(&file).unwrap();
-        assert_eq!(records.len(), 2, "应解析出 2 条：完整 usage + 纯缓存命中");
+        assert_eq!(records.len(), 2, "应解析出 2 条：完整 usage + 纯缓存命中（均按含缓存口径计入）");
         let r = &records[0];
         assert_eq!(r.ts, Some(1754793600000));
         assert_eq!(r.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(r.provider.as_deref(), Some("opencode-go"));
         assert_eq!(r.input, Some(8057.0));
         assert_eq!(r.output, Some(211.0));
-        // dsh 口径：total = input + output + cacheRead
+        // 与各客户端界面一致：total = input + output + cacheRead（缓存计入消耗量）
         assert_eq!(r.total, 8057.0 + 211.0 + 8192.0);
         assert_eq!(r.cache_read, Some(8192.0));
         assert_eq!(r.cost, None);
         let r2 = &records[1];
         assert_eq!(r2.total, 1000.0, "纯缓存命中也计入 total");
-        assert_eq!(r2.input, Some(0.0));
-        assert_eq!(r2.output, Some(0.0));
+        assert_eq!(r2.cache_read, Some(1000.0));
 
         // 损坏文件（非 zstd）→ None（解压失败），不 panic
         std::fs::write(&file, b"not a zstd stream").unwrap();

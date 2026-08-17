@@ -8,11 +8,11 @@ use crate::config::SourceConfig;
 use crate::events::DataUpdate;
 use crate::history::{HistoryStore, QuotaInfo, QuotaItem, RecordIn};
 use crate::sources::local_logs::{
-    extract_json_record, list_jsonl_files, parse_codex_file, parse_dsh_file, scan_params_for_source,
-    ScanParams,
+    extract_json_record, list_jsonl_files, parse_codex_file, parse_dsh_file, parse_zcode_record,
+    scan_params_for_source, ScanParams,
 };
 use crate::sqlite_import::import_zcode_history;
-use crate::util::{now_ms, parse_ts};
+use crate::util::now_ms;
 use notify::{Event, RecursiveMode};
 use notify::Watcher as _;
 use std::collections::{HashMap, HashSet};
@@ -594,7 +594,7 @@ impl WatcherInner {
             let seg = String::from_utf8_lossy(&buf[rs..re]);
             match serde_json::from_str::<serde_json::Value>(&seg) {
                 Ok(v) => {
-                    if let Some(p) = parse_zcode_value(&v) {
+                    if let Some(p) = parse_zcode_record(&v) {
                         records.push(p);
                     }
                     pos = re;
@@ -651,41 +651,4 @@ impl WatcherInner {
             });
         }
     }
-}
-
-/// 与 local_logs 的 zcode 解析保持一致（watcher 中独立解析，避免反转依赖）
-fn parse_zcode_value(r: &serde_json::Value) -> Option<RecordIn> {
-    if !r.is_object() {
-        return None;
-    }
-    let u = r.get("response").and_then(|x| x.get("usage"));
-    let total = u
-        .and_then(|x| x.get("totalTokens").or_else(|| x.get("total_tokens")))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
-    if total <= 0.0 || !total.is_finite() {
-        return None;
-    }
-    let ts = parse_ts(&r["completedAt"])
-        .or_else(|| parse_ts(&r["timestamp"]))
-        .or_else(|| parse_ts(&r["startedAt"]));
-    let model = r
-        .get("model")
-        .and_then(|m| m.get("modelId").or_else(|| m.get("id")))
-        .and_then(serde_json::Value::as_str)
-        .map(|s| s.to_string());
-    let num = |k1: &str, k2: &str| {
-        u.and_then(|x| x.get(k1).or_else(|| x.get(k2)))
-            .and_then(serde_json::Value::as_f64)
-    };
-    Some(RecordIn {
-        ts,
-        model,
-        provider: None,
-        input: num("inputTokens", "input_tokens"),
-        output: num("outputTokens", "output_tokens"),
-        total,
-        cache_read: num("cacheReadTokens", "cached_input_tokens"),
-        cost: None,
-    })
 }

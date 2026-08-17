@@ -51,7 +51,9 @@ fn import_blocking(
         }
     };
     // 导入全部记录（含今天）：sqlite 为权威数据源，rollout 文件不完整
-    let sql = "SELECT completed_at, model_id, input_tokens, output_tokens, computed_total_tokens \
+    // 口径与 zcode 界面一致：total = computed_total_tokens（含缓存命中的原始累计）
+    let sql = "SELECT completed_at, model_id, input_tokens, output_tokens, \
+               cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens \
                FROM model_usage WHERE completed_at IS NOT NULL";
     let mut stmt = match conn.prepare(sql) {
         Ok(s) => s,
@@ -70,7 +72,9 @@ fn import_blocking(
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<f64>>(2)?,
             row.get::<_, Option<f64>>(3)?,
-            row.get::<_, f64>(4)?,
+            row.get::<_, Option<f64>>(4)?,
+            row.get::<_, Option<f64>>(5)?,
+            row.get::<_, f64>(6)?,
         ))
     }) {
         Ok(r) => r,
@@ -85,8 +89,10 @@ fn import_blocking(
     };
 
     let mut by_day: BTreeMap<String, BTreeMap<String, DayModel>> = BTreeMap::new();
+    // 每天 sqlite 最大 completed_at（ms）：用于增量回收（recover_source_day_delta）
+    let mut day_max: BTreeMap<String, i64> = BTreeMap::new();
     for r in rows.flatten() {
-        let (completed_at, model_id, input_tokens, output_tokens, computed_total) = r;
+        let (completed_at, model_id, input_tokens, output_tokens, _cache_read, _cache_create, computed_total) = r;
         let total = computed_total;
         if !total.is_finite() || total <= 0.0 {
             continue;
@@ -94,7 +100,7 @@ fn import_blocking(
         let day = date_key(completed_at);
         let model = model_id.unwrap_or_else(|| "(unknown)".to_string());
         let a = by_day
-            .entry(day)
+            .entry(day.clone())
             .or_default()
             .entry(model)
             .or_insert_with(|| DayModel {
@@ -108,18 +114,24 @@ fn import_blocking(
         a.input += input_tokens.unwrap_or(0.0);
         a.output += output_tokens.unwrap_or(0.0);
         a.calls += 1;
+        let mx = day_max.entry(day).or_insert(0i64);
+        *mx = (*mx).max(completed_at);
     }
 
     let mut imported: u64 = 0;
     for (day, models) in by_day.iter() {
         let calls: u64 = models.values().map(|a| a.calls).sum();
-        // 合并而非整体替换：rollout 实时增量可能包含 sqlite 尚未落库的最新请求，
-        // 整体替换会抹掉它们（偏移已消费无法重加）；按模型取 max 双向都安全（幂等）
-        history.merge_source_day(&source.id, day, models.clone());
+        // sqlite 为权威数据源：按天整体替换（counts 取该天 sqlite 合计）。
+        // 旧实现用 merge（max）只增不减，rollout 侧累计的虚高值无法被 sqlite 收敛；
+        // 整体替换后由 recover_source_day_delta 从 recent 补回 sqlite 尚未落库的最新记录。
+        history.set_source_day(&source.id, day, models.clone());
         imported += calls;
     }
+    if !day_max.is_empty() {
+        history.recover_source_day_delta(&source.id, &day_max);
+    }
     if imported > 0 {
-        log::info!("[sqlite] {}: 回填 {} 条历史（{} 天）", source.name, imported, by_day.len());
+        log::info!("[sqlite] {}: 回填 {} 条历史（{} 天，含缓存口径，与 zcode 界面一致）", source.name, imported, by_day.len());
     }
     ImportResult { imported, days: by_day.len(), skipped: false, error: None }
 }
