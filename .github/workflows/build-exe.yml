@@ -48,6 +48,16 @@ jobs:
         shell: bash
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
+      # 给 exe 加上版本号后缀，避免不同 release 产物重名
+      - name: 重命名 exe 产物
+        id: artifact
+        shell: bash
+        run: |
+          src="src-tauri/target/release/token-usage-widget.exe"
+          dst="token-usage-widget-${{ steps.tag.outputs.tag }}.exe"
+          mv "$src" "$dst"
+          echo "path=$dst" >> "$GITHUB_OUTPUT"
+
       - name: 检查本地发布说明文件是否存在
         id: notes
         shell: bash
@@ -60,7 +70,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.exists == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/token-usage-widget.exe
+          files: ${{ steps.artifact.outputs.path }}
           body_path: notes/${{ steps.tag.outputs.tag }}.md
           draft: true
 
@@ -68,6 +78,6 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') && steps.notes.outputs.exists != 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: src-tauri/target/release/token-usage-widget.exe
+          files: ${{ steps.artifact.outputs.path }}
           generate_release_notes: true
           draft: true
