@@ -143,6 +143,13 @@ pub struct History {
     ///（文件只追加、新事件总在尾部），重启不重复统计；截断重建时整源重置
     #[serde(default)]
     pub dsh_seen: BTreeMap<String, BTreeMap<String, u64>>,
+    /// sqlite 权威回填后已 recover 过的最大 ts（按源 + 天）。
+    /// recover 只处理 `r.ts > max(sqlite day_max, 本字段记录值)` 的 recent 记录，
+    /// 防止同一批 recent 在多次回填中被重复累加到 days（5 分钟一次的 h3 周期回填 + 启动
+    /// 时立即 spawn 一次 → 不去重会让 days 持续虚高）。整体替换某天时（set_source_day）
+    /// 同源该天水位清零；重建/清源时整源清零。
+    #[serde(default)]
+    pub recover_seen: BTreeMap<String, BTreeMap<String, i64>>,
     #[serde(default)]
     pub last_updated: i64,
 }
@@ -335,6 +342,11 @@ impl HistoryStore {
             } else {
                 m.insert(source_id.to_string(), models);
             }
+            // 整体替换该天后，对应 recover 水位失效（旧的 seen 是基于已被覆盖的 days
+            // 累计出来的）：清掉，避免后续 recover 漏掉新一批 recent 增量
+            if let Some(seen_map) = h.recover_seen.get_mut(source_id) {
+                seen_map.remove(day_key);
+            }
             h.last_updated = now_ms();
         }
         self.save_debounced();
@@ -368,26 +380,44 @@ impl HistoryStore {
         self.save_debounced();
     }
 
-    /// sqlite 权威回填后的增量补齐：set_source_day 按天整体替换会抹掉 sqlite 尚未
+/// sqlite 权威回填后的增量补齐：set_source_day 按天整体替换会抹掉 sqlite 尚未
     /// 落库的最新记录（rollout 偏移已消费、无法重加），因此从 recent 找回「超过该天
-    /// sqlite 最新 completed_at」的记录重新累加回 days（只写 days，不重复写入 recent）。
+    /// sqlite 最大 completed_at」的记录重新累加回 days（只写 days，不重复写入 recent）。
     /// day_cutoffs：天 → 该天 sqlite 最大 completed_at(ms)；只处理出现在其中的天。
-    /// 口径：recent 与 sqlite 侧同口径（含缓存 raw 累计），只回收超出权威时点的新记录，幂等收敛。
+    /// 口径：recent 与 sqlite 侧同口径（含缓存 raw 累计），只回收超出权威时点的新记录。
+    ///
+    /// 幂等性：每次回填调用都会跑一次该函数（启动期 spawn + h3 每 5 分钟一次），
+    /// 而 recent 不被本函数修改，单纯按 day_max 筛选 candidates 会让同一批
+    /// "超出 day_max 的 recent" 在多次调用中被重复累加 → days 持续虚高。
+    /// 改用 `recover_seen[source_id][day]` 记录「该天已累计过的最大 ts」，
+    /// candidates 只接受 `r.ts > max(day_max, recover_seen)`，处理完后把当天水位推到
+    /// 本轮处理到的最大 ts。set_source_day 整体替换某天会清掉该天水位（天数已重新落库，
+    /// 旧水位失效）；重建/清源整源清零。
     pub fn recover_source_day_delta(&self, source_id: &str, day_cutoffs: &BTreeMap<String, i64>) {
         if day_cutoffs.is_empty() {
             return;
         }
-        // 先筛选出待回收记录（recent 可 Clone），再在锁内更新 days：
-        // 不能在迭代 recent 的同时可变借用 days（借用冲突）
         let mut h = self.inner.lock().unwrap();
+        // 复制"已累计水位"快照（避免与后续 recent 不可变借用冲突），
+        // candidates 筛选用快照值；处理完成后再把新水位写回 recover_seen
+        let prev_seen: BTreeMap<String, i64> = h
+            .recover_seen
+            .get(source_id)
+            .map(|m| m.clone())
+            .unwrap_or_default();
         let candidates: Vec<RecentRecord> = h
             .recent
             .iter()
             .filter(|r| {
-                r.source_id == source_id
-                    && day_cutoffs
-                        .get(&date_key(r.ts))
-                        .is_some_and(|max_ts| r.ts > *max_ts)
+                if r.source_id != source_id {
+                    return false;
+                }
+                let day = date_key(r.ts);
+                let Some(max_ts) = day_cutoffs.get(&day).copied() else {
+                    return false;
+                };
+                let prev = prev_seen.get(&day).copied().unwrap_or(0);
+                r.ts > max_ts && r.ts > prev
             })
             .cloned()
             .collect();
@@ -395,16 +425,25 @@ impl HistoryStore {
             return;
         }
         let now = now_ms();
-        for r in candidates {
+        // 记录本轮按天实际处理到的最大 ts，回写给 seen_map
+        let mut new_seen: BTreeMap<String, i64> = BTreeMap::new();
+        for r in &candidates {
             let day = date_key(r.ts);
-            let model = r.model;
+            let cur = new_seen.entry(day).or_insert(0);
+            if r.ts > *cur {
+                *cur = r.ts;
+            }
+        }
+        for r in &candidates {
+            let day = date_key(r.ts);
+            let model = &r.model;
             let a = h
                 .days
-                .entry(day)
+                .entry(day.clone())
                 .or_default()
                 .entry(source_id.to_string())
                 .or_default()
-                .entry(model)
+                .entry(model.clone())
                 .or_default();
             a.tokens += r.total;
             a.input += r.input;
@@ -415,6 +454,13 @@ impl HistoryStore {
                 }
             }
             a.calls += 1;
+        }
+        let seen_map = h.recover_seen.entry(source_id.to_string()).or_default();
+        for (day, ts) in new_seen {
+            let cur = seen_map.entry(day).or_insert(0);
+            if ts > *cur {
+                *cur = ts;
+            }
         }
         h.last_updated = now;
         drop(h);
@@ -437,6 +483,10 @@ impl HistoryStore {
         let before = h.recent.len();
         h.recent.retain(|r| r.source_id != source_id);
         if h.recent.len() != before {
+            changed = true;
+        }
+        // 整源清数据后，recover 水位也失效（days 与 recent 都已清空，旧水位不再适用）
+        if h.recover_seen.remove(source_id).is_some() {
             changed = true;
         }
         if changed {
@@ -833,4 +883,173 @@ pub struct AggregateResult {
     pub trend: Vec<TrendPoint>,
     pub heatmap: Vec<HeatmapPoint>,
     pub active_days: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造一条只带必要字段的 recent（其余字段默认）
+    fn rec(ts: i64, source_id: &str, model: &str, total: f64) -> RecentRecord {
+        RecentRecord {
+            ts,
+            source_id: source_id.to_string(),
+            model: model.to_string(),
+            input: 0.0,
+            output: 0.0,
+            total,
+            cost: None,
+        }
+    }
+
+    fn day_total(history: &HistoryStore, day: &str, source_id: &str) -> f64 {
+        let h = history.data();
+        h.days
+            .get(day)
+            .and_then(|m| m.get(source_id))
+            .map(|models| models.values().map(|a| a.tokens).sum())
+            .unwrap_or(0.0)
+    }
+
+    /// 关键回归：recover 多次调用不应重复累加同一批 recent
+    #[test]
+    fn recover_is_idempotent_across_calls() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        // 模拟 today 有 3 条 recent（h2 已经写进 recent）
+        store.add_records(
+            sid,
+            vec![
+                RecordIn {
+                    ts: Some(1_000),
+                    model: Some("m".into()),
+                    provider: None,
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    total: 100.0,
+                    cache_read: None,
+                    cost: None,
+                },
+                RecordIn {
+                    ts: Some(2_000),
+                    model: Some("m".into()),
+                    provider: None,
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    total: 200.0,
+                    cache_read: None,
+                    cost: None,
+                },
+                RecordIn {
+                    ts: Some(3_000),
+                    model: Some("m".into()),
+                    provider: None,
+                    input: Some(0.0),
+                    output: Some(0.0),
+                    total: 300.0,
+                    cache_read: None,
+                    cost: None,
+                },
+            ],
+            true,
+        );
+        // sqlite 端尚未 commit → day_max = 0（cutoffs 不能为空，否则函数早 return）
+        let cutoffs: BTreeMap<String, i64> =
+            vec![("1970-01-01".to_string(), 0i64)].into_iter().collect();
+
+        // 第一次回填：candidates = 全部 3 条（ts 都 > max(0, 0)），days[today] += 600
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, "1970-01-01", sid) - 600.0).abs() < 1e-9);
+
+        // 第二次回填：水位已经把今天处理到 ts=3000，candidates 应为空，days 不变
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, "1970-01-01", sid) - 600.0).abs() < 1e-9);
+
+        // 第三次回填：仍然不变
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, "1970-01-01", sid) - 600.0).abs() < 1e-9);
+    }
+
+    /// 关键回归：sqlite 推进 day_max 后，只有更新过的新 recent 才会被 recover
+    #[test]
+    fn recover_skips_records_already_in_sqlite() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        // recent：4 条（按 ts 升序）
+        let mut manual = Vec::new();
+        for (ts, total) in [(1000, 10.0), (2000, 20.0), (3000, 30.0), (4000, 40.0)] {
+            manual.push(rec(ts, sid, "m", total));
+        }
+        {
+            let mut h = store.inner.lock().unwrap();
+            h.recent = manual;
+        }
+
+        // 第一轮回填：day_max = 0（sqlite 端还没任何记录）→ candidates = 全部 4 条
+        let mut cutoffs = BTreeMap::new();
+        cutoffs.insert("1970-01-01".to_string(), 0i64);
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, "1970-01-01", sid) - 100.0).abs() < 1e-9);
+
+        // 模拟 sqlite 已经 commit 了前 2 条 → day_max[today] = 2000
+        cutoffs.insert("1970-01-01".to_string(), 2_000);
+
+        // set_source_day 整体替换 days（含 SQLite 侧 30），同时清掉当天水位
+        let mut models = BTreeMap::new();
+        models.insert(
+            "m".to_string(),
+            DayModel {
+                tokens: 30.0,
+                input: 0.0,
+                output: 0.0,
+                cost: 0.0,
+                calls: 2,
+            },
+        );
+        store.set_source_day(sid, "1970-01-01", models);
+
+        // 第二轮回填：day_max=2000，水位被 set_source_day 清零；
+        // candidates = ts>2000 的两条（3000,4000）→ days += 30+40 = 70
+        // 最终 days = 30(sqlite) + 70(recover) = 100，与第一轮后持平
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!(
+            (day_total(&store, "1970-01-01", sid) - 100.0).abs() < 1e-9,
+            "期望 days=100，实际 {}",
+            day_total(&store, "1970-01-01", sid)
+        );
+
+        // 第三轮回填：水位已推到 ts=4000，candidates 为空 → days 不变
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, "1970-01-01", sid) - 100.0).abs() < 1e-9);
+    }
+
+    /// clear_source_all 应当同时清掉 recover_seen 整源水位
+    #[test]
+    fn clear_source_drops_recover_seen() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        // 先手动放一条 recent，触发一次 recover，让 seen_map 写入
+        {
+            let mut h = store.inner.lock().unwrap();
+            h.recent.push(rec(1000, sid, "m", 50.0));
+        }
+        // cutoffs 必须非空（函数会在空时早 return），用 day_max=0 让 candidates 入选
+        let mut cutoffs = BTreeMap::new();
+        cutoffs.insert("1970-01-01".to_string(), 0i64);
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!(
+            store
+                .data()
+                .recover_seen
+                .get(sid)
+                .map(|m| !m.is_empty())
+                .unwrap_or(false),
+            "recover 后 seen_map 应非空"
+        );
+        store.clear_source_all(sid);
+        assert!(
+            store.data().recover_seen.get(sid).is_none(),
+            "clear_source_all 后 seen_map 应整源消失"
+        );
+    }
 }
