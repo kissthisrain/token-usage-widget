@@ -32,9 +32,10 @@ pub fn scan_params_for_source(src: &SourceConfig) -> ScanParams {
         }
     } else if tool == "dsh" {
         // DeepSeek Harness：~/.dsh/sessions/<工作区>/session-<uuid>/session.jsonl.zstd
+        // 以及新版 session.v4.jsonl.zstd（后续 session.vN.jsonl.zstd 同样匹配）
         ScanParams {
             recursive: true,
-            pattern: Regex::new(r"^session\.jsonl\.zstd$").unwrap(),
+            pattern: Regex::new(r"^session(?:\.v\d+)?\.jsonl\.zstd$").unwrap(),
             format: "dsh".to_string(),
         }
     } else {
@@ -152,7 +153,7 @@ fn normalize_rate_limits(rl: &Value, ts: i64) -> Option<QuotaItem> {
 }
 
 // ---------- dsh（DeepSeek Harness）格式 ----------
-// 会话日志 session.jsonl.zstd 是 zstd 压缩 JSONL，每行一个事件；只解析 assistant/message 的 usage。
+// 会话日志 session.jsonl.zstd / session.vN.jsonl.zstd 是 zstd 压缩 JSONL，每行一个事件；只解析 assistant/message 的 usage。
 // 注意：zstd 不支持按字节偏移增量读，调用方（watcher）采用「全量解压重读 + 已消费事件数去重」
 //（文件只追加，新事件总在尾部），本函数只负责解压 + 提取记录，不含去重逻辑。
 
@@ -517,6 +518,20 @@ mod tests {
         let rec2 = parse_zcode_record(&total_only).expect("total-only 应解析出记录");
         assert_eq!(rec2.total, 1000.0);
         assert_eq!(rec2.input, None);
+    }
+
+    #[test]
+    fn dsh_scan_matches_legacy_and_versioned_session_files() {
+        let params = scan_params_for_source(&SourceConfig {
+            tool: Some("dsh".to_string()),
+            ..Default::default()
+        });
+        assert!(params.pattern.is_match("session.jsonl.zstd"));
+        assert!(params.pattern.is_match("session.v4.jsonl.zstd"));
+        assert!(params.pattern.is_match("session.v5.jsonl.zstd"));
+        assert!(!params.pattern.is_match("session.jsonl"));
+        assert!(!params.pattern.is_match("other.jsonl.zstd"));
+        assert!(!params.pattern.is_match("session.v4.jsonl"));
     }
 
     #[test]
