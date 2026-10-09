@@ -147,6 +147,16 @@ impl Watcher {
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
         self.start();
         let sources = (self.inner.get_sources)();
+        // 清理已删除源的残留：用户反复「删除 → 重新添加」会让每次新增的 id 在 history.json
+        // 里永久累积（实测 3 个 dsh id 各约 100M 记录）。按 config 里现存的全部 id（含未启用）
+        // 保留，其余从 days/recent/quota/fileOffsets/dshSeen/recoverSeen 中移除。
+        {
+            let valid_ids: HashSet<String> = sources.iter().map(|s| s.id.clone()).collect();
+            if self.inner.history.purge_stale_sources(&valid_ids) {
+                log::info!("[watcher] 已清理配置中不存在的源残留记录");
+                self.inner.history.save_debounced();
+            }
+        }
         // 一次性迁移：dsh seeded 会话过滤上线前，子代理 fork 会话开头继承的父会话历史被计入 days，
         // 导致该源历史虚高（实测 2026-10-08 多计 7.5M）。必须在初始扫描之前同步做完，
         // 否则与增量扫描并发会重复计数。

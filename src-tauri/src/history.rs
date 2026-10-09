@@ -499,6 +499,79 @@ impl HistoryStore {
         }
     }
 
+    /// 清理已从配置中删除的源：days / recent / quota / file_offsets / dsh_seen / recover_seen
+    /// 中所有 sourceId 不在 `valid_ids` 的记录。
+    ///
+    /// 用户反复「删除源 → 重新添加」时每次都会生成新的 sourceId，旧 id 的数据会永久残留在
+    /// history.json 里（每个 id 还带着一份 dshSeen / fileOffsets）；实测 residue 三个 dsh id
+    /// 各占 ~100M 记录。这些残留不会污染界面（build_snapshot 只按 config 里的 id 聚合），
+    /// 但会持续放大 history.json。启动时调用一次即可。
+    ///
+    /// `valid_ids` 为空时直接返回 false：配置里一个源都没有（首次运行 / 用户手动清空配置）时
+    /// 不能把历史全判为残留删掉，否则等于静默清库。
+    ///
+    /// 返回是否发生变化（调用方据此决定是否落盘）。
+    pub fn purge_stale_sources(&self, valid_ids: &HashSet<String>) -> bool {
+        if valid_ids.is_empty() {
+            return false;
+        }
+        let mut h = self.inner.lock().unwrap();
+        let mut changed = false;
+
+        for day in h.days.values_mut() {
+            let stale: Vec<String> = day
+                .keys()
+                .filter(|k| !valid_ids.contains(k.as_str()))
+                .cloned()
+                .collect();
+            for k in stale {
+                day.remove(&k);
+                changed = true;
+            }
+        }
+        // 天被清空后删掉空壳天，避免 history.json 里留下 "{}" 占位
+        let empty_days: Vec<String> = h
+            .days
+            .iter()
+            .filter(|(_, v)| v.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in empty_days {
+            h.days.remove(&k);
+            changed = true;
+        }
+
+        let before = h.recent.len();
+        h.recent.retain(|r| valid_ids.contains(r.source_id.as_str()));
+        if h.recent.len() != before {
+            changed = true;
+        }
+
+        // 各 id 索引表的 value 类型不同（QuotaInfo / BTreeMap<String,u64> / BTreeMap<String,i64>），
+        // 用一个只关心 key 的泛型小工具逐个清理
+        fn drop_unknown<V>(map: &mut BTreeMap<String, V>, valid_ids: &HashSet<String>) -> bool {
+            let stale: Vec<String> = map
+                .keys()
+                .filter(|k| !valid_ids.contains(k.as_str()))
+                .cloned()
+                .collect();
+            let hit = !stale.is_empty();
+            for k in stale {
+                map.remove(&k);
+            }
+            hit
+        }
+        changed |= drop_unknown(&mut h.quota, valid_ids);
+        changed |= drop_unknown(&mut h.file_offsets, valid_ids);
+        changed |= drop_unknown(&mut h.dsh_seen, valid_ids);
+        changed |= drop_unknown(&mut h.recover_seen, valid_ids);
+
+        if changed {
+            h.last_updated = now_ms();
+        }
+        changed
+    }
+
     pub fn set_quota(&self, source_id: &str, info: QuotaInfo) {
         {
             let mut h = self.inner.lock().unwrap();
@@ -1081,5 +1154,77 @@ mod tests {
             store.data().recover_seen.get(sid).is_none(),
             "clear_source_all 后 seen_map 应整源消失"
         );
+    }
+
+    /// purge_stale_sources：清掉配置里已不存在的源，保留有效源；空 valid 集合时不误删
+    #[test]
+    fn purge_stale_sources_drops_only_unknown_ids() {
+        let store = HistoryStore::new_memory();
+        // 有效源 keep + 残留源 stale，两者都写进 days / recent / dsh_seen / file_offsets / quota
+        store.add_records(
+            "keep",
+            vec![RecordIn {
+                ts: Some(1_000),
+                model: Some("m".into()),
+                provider: None,
+                input: None,
+                output: None,
+                total: 100.0,
+                cache_read: None,
+                cost: None,
+            }],
+            true,
+        );
+        store.add_records(
+            "stale",
+            vec![RecordIn {
+                ts: Some(1_000),
+                model: Some("m".into()),
+                provider: None,
+                input: None,
+                output: None,
+                total: 999.0,
+                cache_read: None,
+                cost: None,
+            }],
+            true,
+        );
+        store.set_dsh_seen("stale", "f.jsonl.zstd", 7);
+        store.set_dsh_seen("keep", "f.jsonl.zstd", 3);
+        store.set_file_offset("stale", "f.jsonl.zstd", 42);
+        store.set_file_offset("keep", "f.jsonl.zstd", 42);
+        store.set_quota(
+            "stale",
+            QuotaInfo {
+                items: vec![],
+                ..Default::default()
+            },
+        );
+
+        // 空集合保护：一个源都没配置时不得清库
+        assert!(!store.purge_stale_sources(&HashSet::new()));
+        assert!((day_total(&store, "1970-01-01", "stale") - 999.0).abs() < 1e-9);
+
+        let valid: HashSet<String> = ["keep".to_string()].into_iter().collect();
+        assert!(store.purge_stale_sources(&valid));
+
+        let h = store.data();
+        assert!(
+            (day_total(&store, "1970-01-01", "keep") - 100.0).abs() < 1e-9,
+            "有效源数据必须保留"
+        );
+        for day in h.days.values() {
+            assert!(day.get("stale").is_none(), "残留源应从 days 消失");
+        }
+        assert!(h.recent.iter().all(|r| r.source_id == "keep"));
+        assert!(h.dsh_seen.get("stale").is_none());
+        assert!(h.file_offsets.get("stale").is_none());
+        assert!(h.quota.get("stale").is_none());
+        // 有效源的计数不能被顺手清掉
+        assert_eq!(h.dsh_seen["keep"]["f.jsonl.zstd"], 3);
+        assert_eq!(h.file_offsets["keep"]["f.jsonl.zstd"], 42);
+
+        // 幂等：再跑一次不应报告变化
+        assert!(!store.purge_stale_sources(&valid));
     }
 }
