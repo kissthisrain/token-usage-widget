@@ -11,6 +11,9 @@ dist/
 # 调试产物
 .verify-heatmap.png
 
+# 临时工作目录(构建缓存、排查脚本等,勿提交)
+.tmp-*/
+
 # 日志
 *.log
 

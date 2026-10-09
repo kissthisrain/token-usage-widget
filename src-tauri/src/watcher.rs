@@ -147,6 +147,12 @@ impl Watcher {
         self.inner.epoch.fetch_add(1, Ordering::SeqCst);
         self.start();
         let sources = (self.inner.get_sources)();
+        // 一次性迁移：dsh seeded 会话过滤上线前，子代理 fork 会话开头继承的父会话历史被计入 days，
+        // 导致该源历史虚高（实测 2026-10-08 多计 7.5M）。必须在初始扫描之前同步做完，
+        // 否则与增量扫描并发会重复计数。
+        if self.inner.history.get_dsh_seed_fix() == 0 {
+            self.migrate_dsh_seed_fix(&sources);
+        }
         for src in sources {
             self.inner.watch_source(&src);
             // 初始扫描（含增量）只针对启用的本地记录源；Watcher 可克隆，放 spawn_blocking
@@ -169,6 +175,40 @@ impl Watcher {
                 })
                 .await;
             });
+        }
+    }
+
+    /// 一次性迁移：清空全部 dsh 源历史 + 重置事件计数/偏移，随后由初始扫描全量重扫。
+    /// 同步执行（不走 spawn_blocking）以保证「清空 → 重扫」之间没有并发增量扫描插入。
+    fn migrate_dsh_seed_fix(&self, sources: &[SourceConfig]) {
+        let targets: Vec<(SourceConfig, ScanParams)> = sources
+            .iter()
+            .filter(|s| s.type_ == "local-logs" && s.enabled && s.tool.as_deref() == Some("dsh"))
+            .map(|s| (s.clone(), scan_params_for_source(s)))
+            .collect();
+        if targets.is_empty() {
+            // 未配置 dsh 源：无需迁移，但也要落标记，避免每次启动重复判断
+            self.inner.history.set_dsh_seed_fix();
+            return;
+        }
+        log::info!(
+            "[watcher] dsh seeded 会话过滤迁移：清空 {} 个 dsh 源并全量重扫（旧数据备份为 history.json.pre-seed-fix.bak）",
+            targets.len()
+        );
+        self.inner.history.backup_before_seed_fix();
+        for (src, params) in &targets {
+            self.inner.rebuild_source(src, params);
+        }
+        self.inner.history.set_dsh_seed_fix();
+        for (src, _) in &targets {
+            let _ = self.inner.app.emit(
+                "data:update",
+                DataUpdate {
+                    source_id: Some(src.id.clone()),
+                    reinit: Some(true),
+                    ..Default::default()
+                },
+            );
         }
     }
 

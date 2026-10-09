@@ -150,6 +150,11 @@ pub struct History {
     /// 同源该天水位清零；重建/清源时整源清零。
     #[serde(default)]
     pub recover_seen: BTreeMap<String, BTreeMap<String, i64>>,
+    /// 一次性迁移水位：dsh seeded 会话（子代理 fork）过滤上线前，其文件开头继承的父会话历史
+    /// 被逐条计入 days，导致该源历史虚高（实测 2026-10-08 多计 7.5M）。0 = 尚未迁移，
+    /// 启动时对所有 dsh 源清空重扫一次；1 = 已完成。老 history.json 反序列化默认 0 → 自动迁移。
+    #[serde(default)]
+    pub dsh_seed_fix: u64,
     #[serde(default)]
     pub last_updated: i64,
 }
@@ -570,6 +575,20 @@ impl HistoryStore {
         }
     }
 
+    /// dsh seeded 过滤迁移是否已完成（见 History::dsh_seed_fix）
+    pub fn get_dsh_seed_fix(&self) -> u64 {
+        self.inner.lock().unwrap().dsh_seed_fix
+    }
+
+    /// 标记 dsh seeded 过滤迁移已完成并立即落盘（避免迁移后被重复执行）
+    pub fn set_dsh_seed_fix(&self) {
+        {
+            let mut h = self.inner.lock().unwrap();
+            h.dsh_seed_fix = 1;
+        }
+        self.save_now();
+    }
+
     // ---------- 聚合 ----------
 
     #[allow(clippy::type_complexity)]
@@ -831,6 +850,17 @@ impl HistoryStore {
         }
         if self.file.exists() {
             let _ = std::fs::copy(&self.file, self.file.with_extension("json.pre-heal.bak"));
+        }
+    }
+
+    /// dsh seeded 过滤迁移前快照备份：history.json.pre-seed-fix.bak
+    ///（该迁移会清空 dsh 源历史并重扫，保留旧文件便于核对/回退）
+    pub fn backup_before_seed_fix(&self) {
+        if self.no_persist {
+            return;
+        }
+        if self.file.exists() {
+            let _ = std::fs::copy(&self.file, self.file.with_extension("json.pre-seed-fix.bak"));
         }
     }
 }

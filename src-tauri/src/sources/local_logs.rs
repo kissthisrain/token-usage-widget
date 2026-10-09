@@ -155,10 +155,90 @@ fn normalize_rate_limits(rl: &Value, ts: i64) -> Option<QuotaItem> {
 // ---------- dsh（DeepSeek Harness）格式 ----------
 // 会话日志 session.jsonl.zstd / session.vN.jsonl.zstd 是 zstd 压缩 JSONL，每行一个事件；只解析 assistant/message 的 usage。
 // 注意：zstd 不支持按字节偏移增量读，调用方（watcher）采用「全量解压重读 + 已消费事件数去重」
-//（文件只追加，新事件总在尾部），本函数只负责解压 + 提取记录，不含去重逻辑。
+//（文件只追加，新事件总在尾部），本函数只负责解压 + 提取记录（含 seeded 会话的继承段过滤），不含去重逻辑。
+//
+// seeded 会话（子代理 / sidechat fork）的文件开头是**继承来的父会话历史**，其 assistant/message
+// 与原会话完全同构（同 time / 同 usage），逐条累加会把父会话的用量再算一遍（实测 10-08 多计 7.5M）。
+// 边界见 DshSeedFilter。
 
 /// 解压后大小上限（防异常压缩流膨胀占满内存；正常会话解压后 ≤4MB）
 const MAX_DSH_DECOMPRESSED: u64 = 256 * 1024 * 1024;
+
+/// dsh seeded 会话的继承段过滤规则。
+///
+/// 官方语义（app.asar 内 v2/v3/v4 三套校验器一致）：
+/// - `header.isSeeded === true` 表示该文件是 fork/子代理会话，开头若干事件是继承的父会话历史；
+/// - `session/end-seed` 的 `data.inherited === true` 是**继承段收尾标记**，官方把它所在 seq 记为
+///   `inheritedEventCount`，并强制「有且只有最后一条」（`lastInheritedMarker === cut`）；
+///   即：该行及其之前的全部事件都不属于本会话；
+/// - 老格式（v0/v2，header 无 isSeeded）不含该标记，规则自动退化为 no-op，历史数据不受影响。
+///
+/// 退化判据：有 isSeeded 但找不到标记时，用 `header.createdAt` —— 子会话 createdAt 之前
+/// 不可能产生它自己的调用。实测两种判据在本机 12 个会话文件上结果完全一致。
+#[derive(Default)]
+struct DshSeedFilter {
+    /// 最后一条 `session/end-seed`（`data.inherited == true`）的行号；该行及之前整段丢弃
+    inherited_through: Option<usize>,
+    /// header.createdAt（毫秒），无 inherited 标记时的退化判据
+    created_at: Option<i64>,
+}
+
+impl DshSeedFilter {
+    /// 从解压后的文本里提取过滤规则（只读首行 header + 扫一遍 end-seed 标记）
+    fn from_text(text: &str) -> Self {
+        let mut f = DshSeedFilter::default();
+        // header = 第一行非空行；只有 isSeeded == true 的会话才启用过滤
+        let header_seeded = text
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|l| serde_json::from_str::<Value>(l).ok())
+            .filter(|v| v.get("type").and_then(Value::as_str) == Some("session"))
+            .map(|v| {
+                let seeded = v.get("isSeeded").and_then(Value::as_bool).unwrap_or(false);
+                if seeded {
+                    f.created_at = crate::util::parse_ts(&v["createdAt"]);
+                }
+                seeded
+            })
+            .unwrap_or(false);
+        for (idx, line) in text.lines().enumerate() {
+            // 快速预筛，避免对每行做 JSON 解析
+            if !line.contains("session/end-seed") {
+                continue;
+            }
+            if let Ok(v) = serde_json::from_str::<Value>(line) {
+                if v.get("type").and_then(Value::as_str) == Some("session/end-seed")
+                    && v.pointer("/data/inherited").and_then(Value::as_bool) == Some(true)
+                {
+                    f.inherited_through = Some(idx);
+                }
+            }
+        }
+        if !header_seeded {
+            // 非 seeded：即便出现标记也按「无继承」处理（官方校验器视其为格式非法），
+            // 这样旧格式数据的行为与修复前完全一致
+            f.inherited_through = None;
+            f.created_at = None;
+        }
+        f
+    }
+
+    /// 该行是否为继承内容（应丢弃）
+    fn skips(&self, line_index: usize, ts: Option<i64>) -> bool {
+        if let Some(cut) = self.inherited_through {
+            return line_index <= cut;
+        }
+        match self.created_at {
+            // ts 缺失时保守保留（宁可多算一条，也不丢真实用量）
+            Some(c) => ts.is_some_and(|t| t < c),
+            None => false,
+        }
+    }
+
+    fn is_noop(&self) -> bool {
+        self.inherited_through.is_none() && self.created_at.is_none()
+    }
+}
 
 /// 解析单个 assistant/message 事件 → RecordIn；非目标事件/字段缺失返回 None（全容错）
 fn parse_dsh_record(r: &Value) -> Option<RecordIn> {
@@ -167,10 +247,12 @@ fn parse_dsh_record(r: &Value) -> Option<RecordIn> {
     let input = usage.get("inputTokens").and_then(Value::as_f64).unwrap_or(0.0);
     let output = usage.get("outputTokens").and_then(Value::as_f64).unwrap_or(0.0);
     let cache_read = usage.get("cacheReadTokens").and_then(Value::as_f64).unwrap_or(0.0);
-    // 口径与各客户端界面一致：total = input + output + cacheRead（缓存命中同样计入消耗量）。
+    let cache_write = usage.get("cacheWriteTokens").and_then(Value::as_f64).unwrap_or(0.0);
+    // 口径与 dsh 官方 usageTokens() 一致：total = input + output + cacheRead + cacheWrite
+    //（四个互不重叠的桶；缓存命中同样计入消耗量）。
     // dsh 每次请求都会重放整段会话缓存上下文（cacheRead 占大头），
     // 与 zcode 界面"含缓存 raw 累计"同口径
-    let total = input + output + cache_read;
+    let total = input + output + cache_read + cache_write;
     if total <= 0.0 || !total.is_finite() {
         return None;
     }
@@ -209,8 +291,11 @@ pub fn parse_dsh_file(file_path: &Path) -> Option<Vec<RecordIn>> {
     if !ok.unwrap_or(false) {
         return None;
     }
+    // seeded 会话（子代理 fork）需要跳过开头的父会话继承段；
+    // 非 seeded / 老格式（无 isSeeded 字段）→ filter 为空，行为与修复前完全一致
+    let filter = DshSeedFilter::from_text(&text);
     let mut records = Vec::new();
-    for line in text.lines() {
+    for (idx, line) in text.lines().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
@@ -219,6 +304,9 @@ pub fn parse_dsh_file(file_path: &Path) -> Option<Vec<RecordIn>> {
             Err(_) => continue, // 写入中/损坏行跳过（解压整体成功，个别坏行忽略）
         };
         if r.get("type").and_then(Value::as_str) != Some("assistant/message") {
+            continue;
+        }
+        if !filter.is_noop() && filter.skips(idx, crate::util::parse_ts(&r["time"])) {
             continue;
         }
         if let Some(rec) = parse_dsh_record(&r) {
@@ -591,7 +679,7 @@ mod tests {
         assert_eq!(r.provider.as_deref(), Some("opencode-go"));
         assert_eq!(r.input, Some(8057.0));
         assert_eq!(r.output, Some(211.0));
-        // 与各客户端界面一致：total = input + output + cacheRead（缓存计入消耗量）
+        // 与 dsh 官方 usageTokens() 一致：total = input + output + cacheRead + cacheWrite（缓存计入消耗量）
         assert_eq!(r.total, 8057.0 + 211.0 + 8192.0);
         assert_eq!(r.cache_read, Some(8192.0));
         assert_eq!(r.cost, None);
@@ -602,6 +690,118 @@ mod tests {
         // 损坏文件（非 zstd）→ None（解压失败），不 panic
         std::fs::write(&file, b"not a zstd stream").unwrap();
         assert!(parse_dsh_file(&file).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// seeded 子代理会话（sidechat fork）文件开头是继承的父会话历史，必须整段跳过，
+    /// 否则父会话的 usage 会被子会话文件再累加一遍（实测 2026-10-08 因此多计 7.5M tokens）。
+    #[test]
+    fn dsh_seeded_session_skips_inherited_prefix() {
+        let dir = std::env::temp_dir().join(format!(
+            "usage-test-dsh-seed-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let created_at: i64 = 1754793600000;
+        let msg = |ts: i64, input: f64| {
+            serde_json::json!({
+                "type": "assistant/message",
+                "time": ts,
+                "data": {
+                    "message": { "source": { "kind": "model", "provider": "deepseek-account", "model": "deepseek-flash" } },
+                    "usage": { "inputTokens": input, "outputTokens": 0, "cacheReadTokens": 0 }
+                }
+            })
+        };
+        let end_seed = |inherited: bool| {
+            let data = if inherited {
+                serde_json::json!({ "inherited": true })
+            } else {
+                serde_json::json!({})
+            };
+            serde_json::json!({ "type": "session/end-seed", "time": created_at, "data": data })
+        };
+
+        // --- seeded 会话：header isSeeded=true + 继承段（2 条 assistant/message）+ 最后一条 inherited 标记 + 自己 1 条 ---
+        let file = dir.join("session.v4.jsonl.zstd");
+        {
+            let f = std::fs::File::create(&file).unwrap();
+            let mut enc = zstd::stream::write::Encoder::new(f, 0).unwrap();
+            let header = serde_json::json!({
+                "type": "session",
+                "version": 4,
+                "id": "session-child",
+                "createdAt": created_at,
+                "isSeeded": true,
+                "origin": "subagent",
+                "delegationDepth": 1,
+                "parentSession": "session-parent"
+            });
+            writeln!(enc, "{}", header).unwrap();
+            // 继承自重放：time 早于子会话 createdAt
+            writeln!(enc, "{}", msg(created_at - 60000, 1000.0)).unwrap();
+            writeln!(enc, "{}", msg(created_at - 30000, 2000.0)).unwrap();
+            // 分段标记（data.inherited 缺省 = 普通种子结束，不是继承段终点）
+            writeln!(enc, "{}", end_seed(false)).unwrap();
+            writeln!(enc, "{}", msg(created_at - 10000, 4000.0)).unwrap();
+            // 继承段收尾标记：只认 `inherited: true`，此前的全部内容都要丢弃
+            writeln!(enc, "{}", end_seed(true)).unwrap();
+            // 子会话自己的调用
+            writeln!(enc, "{}", msg(created_at + 5000, 8192.0)).unwrap();
+            enc.finish().unwrap();
+        }
+        let records = parse_dsh_file(&file).unwrap();
+        assert_eq!(records.len(), 1, "seeded 会话只应保留继承段之后的记录");
+        assert_eq!(records[0].ts, Some(created_at + 5000));
+        assert_eq!(records[0].total, 8192.0);
+
+        // --- 非 seeded 会话：即便出现 end-seed 标记也不过虑（老格式无 isSeeded，行为必须与修复前一致）---
+        let plain = dir.join("session.jsonl.zstd");
+        {
+            let f = std::fs::File::create(&plain).unwrap();
+            let mut enc = zstd::stream::write::Encoder::new(f, 0).unwrap();
+            let header = serde_json::json!({
+                "type": "session",
+                "version": 4,
+                "id": "session-plain",
+                "createdAt": created_at,
+                "isSeeded": false
+            });
+            writeln!(enc, "{}", header).unwrap();
+            writeln!(enc, "{}", msg(created_at - 60000, 1000.0)).unwrap();
+            writeln!(enc, "{}", end_seed(true)).unwrap();
+            writeln!(enc, "{}", msg(created_at + 5000, 8192.0)).unwrap();
+            enc.finish().unwrap();
+        }
+        let records = parse_dsh_file(&plain).unwrap();
+        assert_eq!(records.len(), 2, "非 seeded 会话不做任何过滤");
+
+        // --- 退化路径：isSeeded=true 但没有 inherited 标记时，用 createdAt 时间判据 ---
+        let no_marker = dir.join("session.v5.jsonl.zstd");
+        {
+            let f = std::fs::File::create(&no_marker).unwrap();
+            let mut enc = zstd::stream::write::Encoder::new(f, 0).unwrap();
+            let header = serde_json::json!({
+                "type": "session",
+                "version": 5,
+                "id": "session-v5",
+                "createdAt": created_at,
+                "isSeeded": true
+            });
+            writeln!(enc, "{}", header).unwrap();
+            writeln!(enc, "{}", msg(created_at - 60000, 1000.0)).unwrap();
+            writeln!(enc, "{}", end_seed(false)).unwrap();
+            writeln!(enc, "{}", msg(created_at + 5000, 8192.0)).unwrap();
+            enc.finish().unwrap();
+        }
+        let records = parse_dsh_file(&no_marker).unwrap();
+        assert_eq!(records.len(), 1, "无 inherited 标记时按 createdAt 丢弃继承内容");
+        assert_eq!(records[0].total, 8192.0);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
