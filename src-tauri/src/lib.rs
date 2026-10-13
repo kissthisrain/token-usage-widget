@@ -219,10 +219,7 @@ pub fn reinit_core(app: &AppHandle, state: &AppState) {
         log::warn!("开机自启设置失败: {e}");
     }
     state.win_mgr.apply_opacity();
-    let _ = app.emit(
-        "data:update",
-        events::DataUpdate { reinit: Some(true), ..Default::default() },
-    );
+    let _ = app.emit("data:update", events::DataUpdate::default());
 }
 
 /// 全局热键注册（Electron 加速键 → Tauri 加速键）

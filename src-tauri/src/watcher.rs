@@ -8,8 +8,8 @@ use crate::config::SourceConfig;
 use crate::events::DataUpdate;
 use crate::history::{HistoryStore, QuotaInfo, QuotaItem, RecordIn};
 use crate::sources::local_logs::{
-    extract_json_record, list_jsonl_files, parse_codex_file, parse_dsh_file, parse_zcode_record,
-    scan_params_for_source, ScanParams,
+    extract_json_record, list_jsonl_files, parse_codex_file, parse_dsh_file, parse_workbuddy_record,
+    parse_zcode_record, scan_params_for_source, ScanParams,
 };
 use crate::sqlite_import::import_zcode_history;
 use crate::util::now_ms;
@@ -163,29 +163,49 @@ impl Watcher {
         if self.inner.history.get_dsh_seed_fix() == 0 {
             self.migrate_dsh_seed_fix(&sources);
         }
+        for src in &sources {
+            self.inner.watch_source(src);
+        }
+        // 初始扫描（含增量）只针对启用的本地记录源
+        self.spawn_local_scans(&sources);
+    }
+
+    /// 对给定源中「已启用的本地日志源」发起一次增量扫描：Watcher 可克隆，放 spawn_blocking
+    /// 避免阻塞调用线程（重启/保存配置/立即刷新路径），并带 epoch 校验防止旧配置扫描残留。
+    /// 供 `restart`（初始扫描）与 `refresh_now`（立即刷新）复用。
+    fn spawn_local_scans(&self, sources: &[SourceConfig]) {
         for src in sources {
-            self.inner.watch_source(&src);
-            // 初始扫描（含增量）只针对启用的本地记录源；Watcher 可克隆，放 spawn_blocking
-            // 避免阻塞调用线程（重启/保存配置路径），并带 epoch 检查防止旧配置扫描残留
             if src.type_ != "local-logs" || !src.enabled {
                 continue;
             }
-            let params = scan_params_for_source(&src);
+            let params = scan_params_for_source(src);
             let epoch = self.inner.epoch.load(Ordering::SeqCst);
             let this = self.clone();
-            let src0 = src.clone();
-            let params0 = params.clone();
+            let src0 = (*src).clone();
             tauri::async_runtime::spawn(async move {
                 let this2 = this.clone();
                 let _ = tokio::task::spawn_blocking(move || {
                     if this2.inner.epoch.load(Ordering::SeqCst) != epoch {
                         return; // 配置已变更，放弃旧扫描
                     }
-                    this2.inner.scan_source(&src0, &params0);
+                    this2.inner.scan_source(&src0, &params);
                 })
                 .await;
             });
         }
+    }
+
+    /// 「立即刷新」（设置页 / 主界面刷新按钮）：对全部启用的本地日志源做增量扫描，
+    /// 并对 zcode 源发起 sqlite 权威回填。
+    ///
+    /// 此前 refresh_all 只驱动 scheduler（openai/compat/opencode-go），local-logs 在
+    /// run_for_source 里直接 `_ => Ok(())` 被忽略 —— 用户点击「立即刷新」对 ZCode 无效，
+    /// 只能靠「保存设置」触发的 restart 才把虚高值纠正回来。
+    pub fn refresh_now(&self) {
+        let sources = (self.inner.get_sources)();
+        self.spawn_local_scans(&sources);
+        // zcode 权威回填：整体替换当天数据（并钉住水位），把累加态误差收敛回 sqlite 口径
+        self.inner.reimport_sqlite();
     }
 
     /// 一次性迁移：清空全部 dsh 源历史 + 重置事件计数/偏移，随后由初始扫描全量重扫。
@@ -215,7 +235,6 @@ impl Watcher {
                 "data:update",
                 DataUpdate {
                     source_id: Some(src.id.clone()),
-                    reinit: Some(true),
                     ..Default::default()
                 },
             );
@@ -536,7 +555,8 @@ impl WatcherInner {
                 .collect();
             if !delta.is_empty() {
                 let n = delta.len() as u64;
-                self.history.add_records(&src.id, delta, true);
+                // codex 由自身 offset 水位去重，不再叠加 history 侧水位
+                self.history.add_records(&src.id, delta, true, false);
                 let _ = self.app.emit(
                     "data:update",
                     DataUpdate {
@@ -603,7 +623,8 @@ impl WatcherInner {
             if new_count > 0 {
                 let start = records.len() - new_count as usize;
                 let new_records: Vec<RecordIn> = records[start..].to_vec();
-                self.history.add_records(&src.id, new_records, true);
+                // dsh 由自身「已消费事件数」去重，不再叠加 history 侧水位
+                self.history.add_records(&src.id, new_records, true, false);
                 let _ = self.app.emit(
                     "data:update",
                     DataUpdate {
@@ -619,7 +640,7 @@ impl WatcherInner {
             return;
         }
 
-        // zcode：只读增量（多行安全解析：花括号配对提取，损坏片段跳过，尾部未写完留待下次）
+        // zcode / workbuddy：只读增量（多行安全解析：花括号配对提取，损坏片段跳过，尾部未写完留待下次）
         let buf: Vec<u8> = match std::fs::File::open(file) {
             Ok(mut f) => {
                 use std::io::{Read, Seek, SeekFrom};
@@ -644,7 +665,13 @@ impl WatcherInner {
             let seg = String::from_utf8_lossy(&buf[rs..re]);
             match serde_json::from_str::<serde_json::Value>(&seg) {
                 Ok(v) => {
-                    if let Some(p) = parse_zcode_record(&v) {
+                    // 同为追加式 JSONL 的 workbuddy 走同一增量路径，仅解析函数不同
+                    let parsed = if params.format == "workbuddy" {
+                        parse_workbuddy_record(&v)
+                    } else {
+                        parse_zcode_record(&v)
+                    };
+                    if let Some(p) = parsed {
                         records.push(p);
                     }
                     pos = re;
@@ -657,7 +684,9 @@ impl WatcherInner {
         }
         if !records.is_empty() {
             let n = records.len() as u64;
-            self.history.add_records(&src.id, records, true);
+            // zcode 以 sqlite 回填为权威：按水位去重（启动时对当天文件全量重读 offset=0 时整批
+            // 跳过，避免当天用量虚高）。workbuddy 无 sqlite 权威源，仅靠文件 offset 去重。
+            self.history.add_records(&src.id, records, true, params.format == "zcode");
             let _ = self.app.emit(
                 "data:update",
                 DataUpdate {

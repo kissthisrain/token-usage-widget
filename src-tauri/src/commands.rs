@@ -91,6 +91,13 @@ pub async fn test_source(
 #[tauri::command]
 pub async fn refresh_all(state: State<'_, AppState>) -> Result<OkResult, String> {
     state.scheduler.tick().await;
+    // 本地日志源（ZCode / Codex / DSH）不在 scheduler 的处理范围内：scheduler 只负责
+    // openai / compat / opencode-go，local-logs 在 run_for_source 里被直接忽略。
+    // 因此「立即刷新」必须单独触发本地源的增量扫描 + zcode 权威回填，
+    // 否则该按钮对它们毫无作用（此前只有「保存设置」触发的 restart 才会纠正数值）。
+    // 扫描/回填任务完成后会各自 emit data:update 驱动界面刷新；这里不提前 emit，
+    // 以免先刷出一帧尚未更新的旧数据。
+    state.watcher.refresh_now();
     Ok(OkResult { ok: true, error: None, path: None })
 }
 
@@ -126,10 +133,7 @@ pub async fn clear_data(
     state: State<'_, AppState>,
 ) -> Result<OkResult, String> {
     state.history.clear();
-    let _ = app.emit(
-        "data:update",
-        DataUpdate { reinit: Some(true), ..Default::default() },
-    );
+    let _ = app.emit("data:update", DataUpdate::default());
     Ok(OkResult { ok: true, error: None, path: None })
 }
 

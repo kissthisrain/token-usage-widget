@@ -210,6 +210,7 @@ function providerGlyph(name) {
   const s = String(name || '').toLowerCase();
   if (s.includes('zcode')) return '◎';
   if (s.includes('codex')) return '✶';
+  if (s.includes('workbuddy')) return '✧'; // WorkBuddy（本 agent）
   if (s.includes('openai')) return '▲';
   if (s.includes('deepseek')) return '◆';
   if (s.includes('dsh')) return '◆'; // DeepSeek Harness（同品牌字形）
@@ -481,7 +482,7 @@ async function enableSelectedTools() {
       id: 'src_' + t.id + '_' + Date.now().toString(36),
       type: 'local-logs',
       tool: t.tool,
-      name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id,
+      name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id === 'workbuddy' ? 'WorkBuddy' : t.id,
       path: t.path,
       enabled: true,
       displayOrder: cfg.sources.length,
@@ -598,6 +599,22 @@ async function init() {
     api.showMain();
   });
 
+  // 先注册实时更新回调，再拉取首帧快照：否则 sqlite 权威回填 / 增量扫描完成时发出的
+  // data:update 会在回调注册前丢失，首屏就会停留在「累加态」的虚高值上（需手动刷新才恢复）。
+  let t = null;
+  api.onUpdate((ev) => {
+    // 自愈事件：数据源卡死被重置偏移 + 重扫（原数据已备份），提示用户
+    if (ev && ev.healed) {
+      const srcName = ((state.config && state.config.sources.find((s) => s.id === ev.sourceId)) || {}).name || ev.sourceId || '';
+      showToast(`「${srcName}」长时间未更新，已重置偏移并重新扫描（原数据已备份为 history.json.pre-heal.bak）`);
+    }
+    if (t) clearTimeout(t);
+    t = setTimeout(() => {
+      if (!$('onboarding').classList.contains('hidden')) return;
+      refresh();
+    }, 350);
+  });
+
   state.config = await api.getConfig();
   const enabledCount = state.config.sources.filter((s) => s.enabled).length;
   if (!enabledCount) {
@@ -650,20 +667,7 @@ async function init() {
   $('ob-refresh').addEventListener('click', scanTools);
   $('ob-enable').addEventListener('click', enableSelectedTools);
 
-  // 实时更新（去抖）
-  let t = null;
-  api.onUpdate((ev) => {
-    // 自愈事件：数据源卡死被重置偏移 + 重扫（原数据已备份），提示用户
-    if (ev && ev.healed) {
-      const srcName = ((state.config && state.config.sources.find((s) => s.id === ev.sourceId)) || {}).name || ev.sourceId || '';
-      showToast(`「${srcName}」长时间未更新，已重置偏移并重新扫描（原数据已备份为 history.json.pre-heal.bak）`);
-    }
-    if (t) clearTimeout(t);
-    t = setTimeout(() => {
-      if (!$('onboarding').classList.contains('hidden')) return;
-      refresh();
-    }, 350);
-  });
+  // 实时更新（去抖）回调已在 init 开头注册（需早于首帧快照）
 
   // 每分钟兜底刷新 + 窗口尺寸变化时图表自适应
   setInterval(() => { if (!$('onboarding').classList.contains('hidden')) return; refresh(); }, 60000);

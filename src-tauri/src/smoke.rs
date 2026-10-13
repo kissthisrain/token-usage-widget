@@ -72,7 +72,7 @@ pub fn run() {
             let (records, rate_limits) = parse_file(f, &params.format);
             if !records.is_empty() {
                 let count = records.len();
-                history.add_records(&s.id, records, true);
+                history.add_records(&s.id, records, true, s.tool.as_deref() == Some("zcode"));
                 n += count;
             }
             if !rate_limits.is_empty() {

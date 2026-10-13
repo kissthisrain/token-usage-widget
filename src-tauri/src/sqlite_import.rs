@@ -121,10 +121,14 @@ fn import_blocking(
     let mut imported: u64 = 0;
     for (day, models) in by_day.iter() {
         let calls: u64 = models.values().map(|a| a.calls).sum();
-        // sqlite 为权威数据源：按天整体替换（counts 取该天 sqlite 合计）。
+        // sqlite 为权威数据源：按天整体替换（counts 取该天 sqlite 合计），并把该天
+        // 「已累加水位」钉到 sqlite 的最大 completed_at（day_max）。
         // 旧实现用 merge（max）只增不减，rollout 侧累计的虚高值无法被 sqlite 收敛；
+        // 换成整体替换后，水位还必须是 day_max 而不是清空 —— 否则 rollout 一旦全量重读
+        // （offset=0，如启动时）就会把 sqlite 已计过的整批请求再累加一遍（当天用量虚高）。
         // 整体替换后由 recover_source_day_delta 从 recent 补回 sqlite 尚未落库的最新记录。
-        history.set_source_day(&source.id, day, models.clone());
+        let coverage = day_max.get(day).copied().unwrap_or(0);
+        history.set_source_day_authoritative(&source.id, day, models.clone(), coverage);
         imported += calls;
     }
     if !day_max.is_empty() {

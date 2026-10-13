@@ -484,6 +484,7 @@ impl GoProxyInner {
                 cost,
             }],
             true,
+            false,
         );
         let _ = self.app.emit(
             "data:update",

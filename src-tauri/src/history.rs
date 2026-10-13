@@ -143,11 +143,14 @@ pub struct History {
     ///（文件只追加、新事件总在尾部），重启不重复统计；截断重建时整源重置
     #[serde(default)]
     pub dsh_seen: BTreeMap<String, BTreeMap<String, u64>>,
-    /// sqlite 权威回填后已 recover 过的最大 ts（按源 + 天）。
-    /// recover 只处理 `r.ts > max(sqlite day_max, 本字段记录值)` 的 recent 记录，
-    /// 防止同一批 recent 在多次回填中被重复累加到 days（5 分钟一次的 h3 周期回填 + 启动
-    /// 时立即 spawn 一次 → 不去重会让 days 持续虚高）。整体替换某天时（set_source_day）
-    /// 同源该天水位清零；重建/清源时整源清零。
+    /// 「已累加进 days」的水位（按源 + 天）：`recover_seen[sourceId][day] = 最大 ts`。
+    /// 由三处共同维护，确保同一批请求只被计入 days 一次：
+    /// - sqlite 权威回填：[`HistoryStore::set_source_day_authoritative`] 把水位钉到该天 day_max；
+    /// - 增量补齐：[`HistoryStore::recover_source_day_delta`] 只回收 `r.ts > 水位` 的 recent；
+    /// - rollout 增量：[`HistoryStore::add_records`]（watermark=true）只接受 `ts > 水位`。
+    /// 修复「启动时当天用量虚高、刷新后恢复」：旧实现在整体替换时把水位清空，
+    /// rollout 全量重读（offset=0）便失去去重依据，把已落库的整批请求再累加一遍。
+    /// 重建/清源时整源清零。
     #[serde(default)]
     pub recover_seen: BTreeMap<String, BTreeMap<String, i64>>,
     /// 一次性迁移水位：dsh seeded 会话（子代理 fork）过滤上线前，其文件开头继承的父会话历史
@@ -275,21 +278,58 @@ impl HistoryStore {
     }
 
     /// 记录归一化并累加；opts.use_recent=false 时只累加 days 不写 recent（API 全量源）
-    pub fn add_records(&self, source_id: &str, records: Vec<RecordIn>, use_recent: bool) {
+    ///
+    /// `watermark=true`（zcode 等「以 sqlite 为权威」的源）：按 `recover_seen` 记录的
+    /// 「该源-天已累加进 days 的最大 ts」去重，只接受 `ts > 水位` 的记录，并在**整批处理完**
+    /// 之后把水位一次性推进到本批最大 ts。
+    ///
+    /// 水位按「批」推进而非逐条推进：毫秒级 ts 下同一批出现多条同 ts 请求很常见，逐条抬水位
+    /// 会让第 2 条起被 `ts <= 水位` 跳过而漏计；改为整批处理完再推进，同批同 ts 记录都能计入。
+    ///
+    /// 这样 rollout 增量累加与 sqlite 整体替换会收敛到同一口径：即使启动时对当天 rollout
+    /// 文件做全量重读（offset=0）、或收到重复的 notify 事件，已经落库的请求也不会被再叠加
+    /// 一次 —— 修复「刚打开界面当天用量虚高、保存设置刷新后才恢复正常」的根因。
+    pub fn add_records(
+        &self,
+        source_id: &str,
+        records: Vec<RecordIn>,
+        use_recent: bool,
+        watermark: bool,
+    ) {
         let mut changed = false;
         {
             let mut h = self.inner.lock().unwrap();
             let now = now_ms();
+            // 批量起始水位快照：整批共用同一基准，避免「边处理边抬水位」把同一批内 ts 相同的
+            // 记录误判为重复而漏计（毫秒级 ts 下同批多请求很常见）。水位在整批处理完后再推进。
+            let start_ws: BTreeMap<String, i64> = if watermark {
+                h.recover_seen.get(source_id).cloned().unwrap_or_default()
+            } else {
+                BTreeMap::new()
+            };
+            // 本批按天接受记录的最大 ts：整批处理结束后一次性并入 recover_seen
+            let mut batch_max: BTreeMap<String, i64> = BTreeMap::new();
             for r in &records {
                 if !r.total.is_finite() || r.total <= 0.0 {
                     continue;
                 }
                 let ts = r.ts.unwrap_or(now);
                 let key = date_key(ts);
+                if watermark {
+                    // 已被 sqlite 回填（或前批累加）覆盖到该 ts → 跳过，避免 days/recent 重复计入
+                    let prev = start_ws.get(&key).copied().unwrap_or(0);
+                    if ts <= prev {
+                        continue;
+                    }
+                    let m = batch_max.entry(key.clone()).or_insert(0);
+                    if ts > *m {
+                        *m = ts;
+                    }
+                }
                 let model = r.model.as_deref().unwrap_or("(unknown)").to_string();
                 let a = h
                     .days
-                    .entry(key)
+                    .entry(key.clone())
                     .or_default()
                     .entry(source_id.to_string())
                     .or_default()
@@ -316,6 +356,16 @@ impl HistoryStore {
                     });
                 }
                 changed = true;
+            }
+            if watermark {
+                // 整批处理完再推进水位：同批内 ts 相同的记录都已计入，不会互相误判为重复
+                for (day, mx) in &batch_max {
+                    let seen = h.recover_seen.entry(source_id.to_string()).or_default();
+                    let cur = seen.entry(day.clone()).or_insert(0);
+                    if *mx > *cur {
+                        *cur = *mx;
+                    }
+                }
             }
             if changed {
                 let cutoff = now - RECENT_KEEP_DAYS * 86400000;
@@ -357,6 +407,43 @@ impl HistoryStore {
         self.save_debounced();
     }
 
+    /// sqlite 权威回填某天：整体替换该天数据，并把「已累加水位」设为该天权威数据覆盖到的
+    /// 最大 ts（`coverage_ts` = 该天 sqlite 的最大 completed_at）。
+    ///
+    /// 与 [`set_source_day`] 的关键差异：**不删除水位，而是把它钉在权威覆盖上界**。
+    /// set_source_day 只做整体替换、把水位清空，于是后续 rollout 增量（add_records）
+    /// 没有任何「已计过」的记忆：一旦对当天文件全量重读（offset=0），会把 sqlite 已经
+    /// 计过的整批请求再累加一遍 → 当天用量虚高，直到下一次回填才自愈（实测 46M → 79M）。
+    /// 这里把水位设为 day_max 后：
+    /// - `add_records(watermark=true)` 跳过 `ts <= day_max` 的重复记录；
+    /// - [`recover_source_day_delta`] 仍按 `ts > day_max` 从 recent 补回 sqlite 尚未落库的增量。
+    /// 两者口径一致，与回填/扫描的先后顺序无关。
+    pub fn set_source_day_authoritative(
+        &self,
+        source_id: &str,
+        day_key: &str,
+        models: BTreeMap<String, DayModel>,
+        coverage_ts: i64,
+    ) {
+        {
+            let mut h = self.inner.lock().unwrap();
+            let m = h.days.entry(day_key.to_string()).or_default();
+            if models.is_empty() {
+                m.remove(source_id);
+            } else {
+                m.insert(source_id.to_string(), models);
+            }
+            if coverage_ts > 0 {
+                h.recover_seen
+                    .entry(source_id.to_string())
+                    .or_default()
+                    .insert(day_key.to_string(), coverage_ts);
+            }
+            h.last_updated = now_ms();
+        }
+        self.save_debounced();
+    }
+
     /// 合并某天某源：按模型取各计数器的最大值（不覆盖已有值）。
     /// 用于 sqlite 权威回填与实时增量（rollout）混写同一天——两者都覆盖同一批请求，
     /// sqlite 通常更完整、rollout 能捕获最新未落库的记录，取 max 双向都安全（幂等，不丢数据）。
@@ -385,19 +472,19 @@ impl HistoryStore {
         self.save_debounced();
     }
 
-/// sqlite 权威回填后的增量补齐：set_source_day 按天整体替换会抹掉 sqlite 尚未
-    /// 落库的最新记录（rollout 偏移已消费、无法重加），因此从 recent 找回「超过该天
-    /// sqlite 最大 completed_at」的记录重新累加回 days（只写 days，不重复写入 recent）。
+    /// sqlite 权威回填后的增量补齐：set_source_day_authoritative 按天整体替换会抹掉
+    /// sqlite 尚未落库的最新记录（rollout 偏移已消费、无法重加），因此从 recent 找回
+    /// 「超过该天 sqlite 最大 completed_at」的记录重新累加回 days（只写 days，不重复写入 recent）。
     /// day_cutoffs：天 → 该天 sqlite 最大 completed_at(ms)；只处理出现在其中的天。
     /// 口径：recent 与 sqlite 侧同口径（含缓存 raw 累计），只回收超出权威时点的新记录。
     ///
     /// 幂等性：每次回填调用都会跑一次该函数（启动期 spawn + h3 每 5 分钟一次），
     /// 而 recent 不被本函数修改，单纯按 day_max 筛选 candidates 会让同一批
     /// "超出 day_max 的 recent" 在多次调用中被重复累加 → days 持续虚高。
-    /// 改用 `recover_seen[source_id][day]` 记录「该天已累计过的最大 ts」，
-    /// candidates 只接受 `r.ts > max(day_max, recover_seen)`，处理完后把当天水位推到
-    /// 本轮处理到的最大 ts。set_source_day 整体替换某天会清掉该天水位（天数已重新落库，
-    /// 旧水位失效）；重建/清源整源清零。
+    /// 改用 `recover_seen[source_id][day]` 记录「该天已累计到 days 的最大 ts」（与
+    /// add_records(watermark=true) 共用同一水位），candidates 只接受
+    /// `r.ts > max(day_max, recover_seen)`，处理完后把当天水位推到本轮处理到的最大 ts。
+    /// 回填整体替换某天时由 set_source_day_authoritative 把水位钉到 day_max；重建/清源整源清零。
     pub fn recover_source_day_delta(&self, source_id: &str, day_cutoffs: &BTreeMap<String, i64>) {
         if day_cutoffs.is_empty() {
             return;
@@ -1014,6 +1101,30 @@ mod tests {
             .unwrap_or(0.0)
     }
 
+    /// 构造一条 RecordIn（测试用）
+    fn ri(ts: i64, model: &str, total: f64) -> RecordIn {
+        RecordIn {
+            ts: Some(ts),
+            model: Some(model.to_string()),
+            provider: None,
+            input: Some(0.0),
+            output: Some(0.0),
+            total,
+            cache_read: None,
+            cost: None,
+        }
+    }
+
+    fn day_model(tokens: f64, calls: u64) -> DayModel {
+        DayModel {
+            tokens,
+            input: 0.0,
+            output: 0.0,
+            cost: 0.0,
+            calls,
+        }
+    }
+
     /// 关键回归：recover 多次调用不应重复累加同一批 recent
     #[test]
     fn recover_is_idempotent_across_calls() {
@@ -1055,6 +1166,7 @@ mod tests {
                 },
             ],
             true,
+            false,
         );
         // sqlite 端尚未 commit → day_max = 0（cutoffs 不能为空，否则函数早 return）
         let cutoffs: BTreeMap<String, i64> =
@@ -1097,7 +1209,8 @@ mod tests {
         // 模拟 sqlite 已经 commit 了前 2 条 → day_max[today] = 2000
         cutoffs.insert("1970-01-01".to_string(), 2_000);
 
-        // set_source_day 整体替换 days（含 SQLite 侧 30），同时清掉当天水位
+        // set_source_day_authoritative 整体替换 days（含 SQLite 侧 30），并把水位钉到 day_max=2000
+        // （生产路径 zcode 回填即走此函数；不再像旧 set_source_day 那样清空水位）
         let mut models = BTreeMap::new();
         models.insert(
             "m".to_string(),
@@ -1109,9 +1222,9 @@ mod tests {
                 calls: 2,
             },
         );
-        store.set_source_day(sid, "1970-01-01", models);
+        store.set_source_day_authoritative(sid, "1970-01-01", models, 2_000);
 
-        // 第二轮回填：day_max=2000，水位被 set_source_day 清零；
+        // 第二轮回填：day_max=2000、水位=2000；
         // candidates = ts>2000 的两条（3000,4000）→ days += 30+40 = 70
         // 最终 days = 30(sqlite) + 70(recover) = 100，与第一轮后持平
         store.recover_source_day_delta(sid, &cutoffs);
@@ -1124,6 +1237,117 @@ mod tests {
         // 第三轮回填：水位已推到 ts=4000，candidates 为空 → days 不变
         store.recover_source_day_delta(sid, &cutoffs);
         assert!((day_total(&store, "1970-01-01", sid) - 100.0).abs() < 1e-9);
+    }
+
+    /// 根因回归：sqlite 权威回填后，rollout 全量重读（offset=0）不得把已落库的当天数据再叠加。
+    /// 复现线上现象 —— 界面先显示 46M+33M≈79M（虚高），设置页刷新/周期回填后才恢复 46M。
+    #[test]
+    fn rollout_reread_skipped_after_authoritative_backfill() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        let day = "1970-01-01";
+
+        // 1) sqlite 权威回填：当天 3 笔、合计 60、day_max = 3000
+        let mut models = BTreeMap::new();
+        models.insert("m".to_string(), day_model(60.0, 3));
+        store.set_source_day_authoritative(sid, day, models, 3_000);
+        assert!((day_total(&store, day, sid) - 60.0).abs() < 1e-9);
+
+        // 2) rollout 全量重读：同一批请求（ts 1000/2000/3000）再次送入 → 全部被水位拦下
+        store.add_records(
+            sid,
+            vec![ri(1_000, "m", 10.0), ri(2_000, "m", 20.0), ri(3_000, "m", 30.0)],
+            true,
+            true,
+        );
+        assert!(
+            (day_total(&store, day, sid) - 60.0).abs() < 1e-9,
+            "重复重读不应叠加，实际 {}",
+            day_total(&store, day, sid)
+        );
+
+        // 3) 真正的新记录（ts > 水位）仍要计入
+        store.add_records(sid, vec![ri(4_000, "m", 40.0)], true, true);
+        assert!((day_total(&store, day, sid) - 100.0).abs() < 1e-9);
+
+        // 4) 再次全量重读（含上一步的新记录）→ 仍不叠加（水位已推高到 4000）
+        store.add_records(
+            sid,
+            vec![
+                ri(1_000, "m", 10.0),
+                ri(2_000, "m", 20.0),
+                ri(3_000, "m", 30.0),
+                ri(4_000, "m", 40.0),
+            ],
+            true,
+            true,
+        );
+        assert!((day_total(&store, day, sid) - 100.0).abs() < 1e-9);
+
+        // 5) 非权威源（watermark=false）行为不变：重复送入仍按原语义累加
+        let s2 = "codex";
+        store.add_records(s2, vec![ri(1_000, "m", 10.0)], true, false);
+        store.add_records(s2, vec![ri(1_000, "m", 10.0)], true, false);
+        assert!((day_total(&store, day, s2) - 20.0).abs() < 1e-9);
+    }
+
+    /// 关键回归：sqlite 后续回填抬高 day_max 时，水位钉到新 day_max；仍不重复计入
+    #[test]
+    fn authoritative_backfill_keeps_watermark_monotonic() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        let day = "1970-01-01";
+        // 首轮：sqlite 只有 1 笔（day_max=1000）
+        let mut m1 = BTreeMap::new();
+        m1.insert("m".to_string(), day_model(10.0, 1));
+        store.set_source_day_authoritative(sid, day, m1, 1_000);
+        // rollout 送 2 笔（一对已落库、一笔新）
+        store.add_records(sid, vec![ri(1_000, "m", 10.0), ri(2_000, "m", 20.0)], true, true);
+        assert!((day_total(&store, day, sid) - 30.0).abs() < 1e-9);
+
+        // 第二轮：sqlite 追平（2 笔，day_max=2000）→ 整体替换 + 水位推到 2000
+        let mut m2 = BTreeMap::new();
+        m2.insert("m".to_string(), day_model(30.0, 2));
+        store.set_source_day_authoritative(sid, day, m2, 2_000);
+        // recover 从 recent 补回 ts>2000 的记录（此处无）→ 保持 30
+        let mut cutoffs = BTreeMap::new();
+        cutoffs.insert(day.to_string(), 2_000i64);
+        store.recover_source_day_delta(sid, &cutoffs);
+        assert!((day_total(&store, day, sid) - 30.0).abs() < 1e-9);
+        // 全量重读仍不叠加
+        store.add_records(sid, vec![ri(1_000, "m", 10.0), ri(2_000, "m", 20.0)], true, true);
+        assert!((day_total(&store, day, sid) - 30.0).abs() < 1e-9);
+    }
+
+    /// 回归：同一批内 ts 相同的多条记录不得互相去重（水位按批推进，而非逐条）
+    #[test]
+    fn same_ts_records_in_one_batch_are_all_counted() {
+        let store = HistoryStore::new_memory();
+        let sid = "zcode";
+        let day = "1970-01-01";
+        // 同一毫秒两条请求：都计入（旧实现逐条抬水位会把第 2 条跳过 → 只算 10）
+        store.add_records(
+            sid,
+            vec![ri(1_000, "m", 10.0), ri(1_000, "m", 20.0)],
+            true,
+            true,
+        );
+        assert!(
+            (day_total(&store, day, sid) - 30.0).abs() < 1e-9,
+            "同批同 ts 应全部计入，实际 {}",
+            day_total(&store, day, sid)
+        );
+        // 整批全量重读仍不叠加（水位已推进到 1000）
+        store.add_records(
+            sid,
+            vec![ri(1_000, "m", 10.0), ri(1_000, "m", 20.0)],
+            true,
+            true,
+        );
+        assert!((day_total(&store, day, sid) - 30.0).abs() < 1e-9);
+        // 新的一条（ts 更大）继续计入
+        store.add_records(sid, vec![ri(2_000, "m", 5.0)], true, true);
+        assert!((day_total(&store, day, sid) - 35.0).abs() < 1e-9);
     }
 
     /// clear_source_all 应当同时清掉 recover_seen 整源水位
@@ -1174,6 +1398,7 @@ mod tests {
                 cost: None,
             }],
             true,
+            false,
         );
         store.add_records(
             "stale",
@@ -1188,6 +1413,7 @@ mod tests {
                 cost: None,
             }],
             true,
+            false,
         );
         store.set_dsh_seen("stale", "f.jsonl.zstd", 7);
         store.set_dsh_seen("keep", "f.jsonl.zstd", 3);

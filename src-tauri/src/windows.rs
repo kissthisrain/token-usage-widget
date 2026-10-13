@@ -117,30 +117,61 @@ impl WindowMgr {
         let pinned = cfg.general.always_on_top;
         let acrylic = can_acrylic();
 
-        let mut builder = WebviewWindowBuilder::new(&self.app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
-            .title("Token 用量")
-            .inner_size(440.0, 700.0)
-            .decorations(false)
-            .transparent(true)
-            // 固定大小（用户不可拖边框调整）；视图切换的 set_size 仍由程序控制
-            .resizable(false)
-            .maximizable(false)
-            .fullscreen(false)
-            .skip_taskbar(true)
-            .shadow(acrylic)
-            .always_on_top(pinned)
-            .visible(false)
-            .background_color(Color(16, 18, 22, 255));
-        if let Some(b) = &bounds {
-            if let (Some(x), Some(y)) = (b.x, b.y) {
-                builder = builder.position(x, y);
+        // WebView2 偶发 ERROR_BUSY（0x800700AA「请求的资源在使用中」）：多见于上一个实例的
+        // WebView2 子进程尚未完全退出、或同一用户数据目录被瞬时占用。旧实现在失败时直接放弃，
+        // 程序会退化成「无窗口但仍在运行」的僵尸进程并继续占着该目录，导致之后每次启动都失败。
+        // 这里改为退避重试；仍失败则弹提示并退出进程（释放占用，便于下次启动）。
+        let mut built: Option<WebviewWindow> = None;
+        for attempt in 1..=3u32 {
+            let mut builder =
+                WebviewWindowBuilder::new(&self.app, WIDGET_LABEL, WebviewUrl::App("index.html".into()))
+                    .title("Token 用量")
+                    .inner_size(440.0, 700.0)
+                    .decorations(false)
+                    .transparent(true)
+                    // 固定大小（用户不可拖边框调整）；视图切换的 set_size 仍由程序控制
+                    .resizable(false)
+                    .maximizable(false)
+                    .fullscreen(false)
+                    .skip_taskbar(true)
+                    .shadow(acrylic)
+                    .always_on_top(pinned)
+                    .visible(false)
+                    .background_color(Color(16, 18, 22, 255));
+            if let Some(b) = &bounds {
+                if let (Some(x), Some(y)) = (b.x, b.y) {
+                    builder = builder.position(x, y);
+                }
+            }
+            match builder.build() {
+                Ok(w) => {
+                    built = Some(w);
+                    break;
+                }
+                Err(e) => {
+                    log::error!("创建小组件窗口失败（第 {attempt}/3 次）: {e}");
+                    if attempt < 3 {
+                        std::thread::sleep(std::time::Duration::from_millis(1500));
+                    }
+                }
             }
         }
-        let win = match builder.build() {
-            Ok(w) => w,
-            Err(e) => {
-                log::error!("创建小组件窗口失败: {e}");
-                return;
+        let win = match built {
+            Some(w) => w,
+            None => {
+                log::error!("创建小组件窗口失败（已重试 3 次），退出进程以释放 WebView2 占用");
+                use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+                self.app
+                    .dialog()
+                    .message(
+                        "无法创建应用界面：WebView2 资源被占用。\n\n\
+                         常见原因：已有一个「Token 用量」实例在后台运行（可能没有窗口）。\n\
+                         请在任务管理器结束所有 token-usage-widget.exe 进程后重试。",
+                    )
+                    .title("Token 用量 · 启动失败")
+                    .kind(MessageDialogKind::Error)
+                    .blocking_show();
+                std::process::exit(1);
             }
         };
         if acrylic {

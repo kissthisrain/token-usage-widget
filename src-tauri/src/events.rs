@@ -10,7 +10,5 @@ pub struct DataUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub count: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reinit: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub healed: Option<bool>,
 }
