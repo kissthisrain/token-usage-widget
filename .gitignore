@@ -22,3 +22,7 @@ Thumbs.db
 .DS_Store
 src-tauri/target/
 src-tauri/gen/schemas/
+
+# AI agent 工作数据(会话记录/记忆等,含本机路径,勿提交)
+.workbuddy/
+.workbuddy-ai/
