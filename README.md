@@ -16,12 +16,13 @@
 - **活动**：GitHub 风格热力图 + 活跃天数
 - **时间筛选**：DAY / MONTH / TOTAL 三档
 
-## 数据源（6 类）
+## 数据源（7 类）
 
 | 类型 | 配置 | 说明 |
 |---|---|---|
 | **本地记录** | 自动探测（零配置） | 实时监听 ZCode（`~/.zcode/cli/rollout/model-io-*.jsonl`）与 Codex（`~/.codex/sessions/**/rollout-*.jsonl`）会话日志，毫秒级推送。ZCode 实时日志只保留当天，**历史用量自动从 `~/.zcode/cli/db/db.sqlite` 的 model_usage 表回填**（只读，按天去重，热力图/趋势立刻有 30 天数据） |
 | **dsh（DeepSeek Harness）** | 自动探测（零配置） | 实时监听 dsh 会话日志（`~/.dsh/sessions/**/session.jsonl.zstd` 及 `session.vN.jsonl.zstd`，zstd 压缩 JSONL），统计每次模型请求的 token 用量。**口径为实际处理/计费 token（total = input + output + cacheRead + cacheWrite，与 dsh 官方 usageTokens() 一致）**：dsh 每次请求都会重放整段会话缓存上下文，cacheRead 占绝对大头，按此口径才反映真实消耗。会话过程中实时追加，重启不重复统计。seeded 子代理会话开头继承的父会话历史会被自动剔除，不重复计数 |
+| **WorkBuddy（本 agent）** | 自动探测（零配置） | 实时监听本 agent 会话日志（`~/.workbuddy-ai/projects/<项目slug>/<会话uuid>.jsonl`），统计每轮模型请求的 token 用量（`providerData.rawUsage`）。`prompt_tokens` 为每轮的完整上下文，多轮工具循环会重复计入（行业标准口径），总量偏大属正常。文件只追加，重启不重复统计 |
 | **OpenAI 官方** | Base URL + API Key | 用量 API（`/v1/usage`），需**组织管理员** Key；支持回填 90 天历史 |
 | **兼容中转站** | Base URL + API Key | 自动探测常见余额接口，或自定义 URL + 字段映射 |
 | **OpenCode Go 本地代理** | 代理端口 + 上游 URL | 客户端指向 `http://127.0.0.1:<端口>`，代理转发到 `opencode.ai/zen/go` 并记录每次请求（估算，仅统计本机），对照官方限额计算剩余% |

@@ -74,6 +74,14 @@
     );
   }
 
+  // ---- WorkBuddy（本 agent）：圆角方 + W 字标（无公开 SVG，手绘近似，靛紫 #7C5CFF）----
+  function workbuddyLogo() {
+    return svg(
+      `<rect x="3.2" y="3.2" width="17.6" height="17.6" rx="5" fill="none" stroke="#7C5CFF" stroke-width="1.7"/>` +
+        `<path fill="none" stroke="#7C5CFF" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" d="M7 9.2 L9.1 15 L12 10.6 L14.9 15 L17 9.2"/>`
+    );
+  }
+
   const LOGOS = {
     openai: svg(`<path fill="#10A37F" d="${OPENAI_PATH}"/>`),
     claude: svg(`<path fill="#D97757" d="${CLAUDE_PATH}"/>`),
@@ -88,6 +96,7 @@
     mimo: svg(`<path fill="#FF6900" d="${XIAOMI_PATH}"/>`),
     codex: codexLogo(),
     zcode: zcodeLogo(),
+    workbuddy: workbuddyLogo(),
     opencode: svg(`<path fill="#CBD5E1" d="${OPENCODE_PATH}"/>`),
   };
 
@@ -97,6 +106,7 @@
   const RULES = [
     [/zcode/i, 'zcode'],
     [/codex/i, 'codex'],
+    [/workbuddy|codebuddy/i, 'workbuddy'],
     [/opencode/i, 'opencode'],
     [/grok|xai/i, 'grok'],
     [/kimi|moonshot/i, 'kimi'],

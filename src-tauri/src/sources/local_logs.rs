@@ -38,6 +38,14 @@ pub fn scan_params_for_source(src: &SourceConfig) -> ScanParams {
             pattern: Regex::new(r"^session(?:\.v\d+)?\.jsonl\.zstd$").unwrap(),
             format: "dsh".to_string(),
         }
+    } else if tool == "workbuddy" {
+        // WorkBuddy（本 agent）：~/.workbuddy-ai/projects/<项目slug>/<会话uuid>.jsonl（追加式）。
+        // 同目录的 <uuid>.file-rollback.ndjson 扩展名为 .ndjson，不匹配 `\.jsonl$`，天然排除。
+        ScanParams {
+            recursive: true,
+            pattern: Regex::new(r"\.jsonl$").unwrap(),
+            format: "workbuddy".to_string(),
+        }
     } else {
         let pat = src.file_pattern.clone().unwrap_or_else(|| r"\.jsonl$".to_string());
         ScanParams {
@@ -399,7 +407,50 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<(RecordIn, u64)>, Vec<QuotaIte
     (records, rate_limits)
 }
 
-/// 通用入口：zcode / 自定义 → 逐行 zcode 解析；codex → 全文件有序解析；dsh → zstd 解压解析
+// ---------- WorkBuddy（本 agent）格式 ----------
+/// 解析 WorkBuddy 单条会话记录 → RecordIn。
+///
+/// 用量挂在 `providerData.rawUsage`（OpenAI 风格）：
+/// `prompt_tokens` 已含缓存命中（`prompt_cache_hit_tokens`），因此 total 与 zcode 界面口径一致
+/// （含缓存累计）。同一会话里每条带 rawUsage 的记录对应一次模型请求，`providerData.messageId`
+/// 唯一，配合文件 offset 增量读取即可天然去重。
+/// 注意：`prompt_tokens` 是每轮的完整上下文，agent 多轮工具循环会重复计入（行业标准口径）。
+pub fn parse_workbuddy_record(r: &Value) -> Option<RecordIn> {
+    if !r.is_object() {
+        return None;
+    }
+    let pd = r.get("providerData")?;
+    let u = pd.get("rawUsage")?;
+    let total = u
+        .get("total_tokens")
+        .or_else(|| u.get("totalTokens"))
+        .and_then(Value::as_f64)
+        .unwrap_or(0.0);
+    if total <= 0.0 || !total.is_finite() {
+        return None;
+    }
+    let ts = parse_ts(&r["timestamp"]).or_else(|| parse_ts(&r["completedAt"]));
+    let model = pd
+        .get("requestModelName")
+        .or_else(|| pd.get("model"))
+        .and_then(Value::as_str)
+        .map(|s| s.to_string());
+    let num = |k: &str| u.get(k).and_then(Value::as_f64);
+    // credit 为 0 表示走免费额度/未计价 → 不写 cost，避免把 0 当成真实费用
+    let cost = num("credit").filter(|c| *c > 0.0);
+    Some(RecordIn {
+        ts,
+        model,
+        provider: None,
+        input: num("prompt_tokens"),
+        output: num("completion_tokens"),
+        total,
+        cache_read: num("prompt_cache_hit_tokens").or_else(|| num("cache_read_input_tokens")),
+        cost,
+    })
+}
+
+/// 通用入口：zcode / 自定义 / workbuddy → 逐行解析；codex → 全文件有序解析；dsh → zstd 解压解析
 pub fn parse_file(file_path: &Path, format: &str) -> (Vec<RecordIn>, Vec<QuotaItem>) {
     if format == "codex" {
         let (records, rate_limits) = parse_codex_file(file_path);
@@ -421,7 +472,12 @@ pub fn parse_file(file_path: &Path, format: &str) -> (Vec<RecordIn>, Vec<QuotaIt
             Ok(v) => v,
             Err(_) => continue,
         };
-        if let Some(rec) = parse_zcode_record(&r) {
+        let parsed = if format == "workbuddy" {
+            parse_workbuddy_record(&r)
+        } else {
+            parse_zcode_record(&r)
+        };
+        if let Some(rec) = parsed {
             records.push(rec);
         }
     }
@@ -560,6 +616,47 @@ mod tests {
         assert_eq!(delta.len(), 2, "水位线之后应只有 2 条新增记录");
         assert_eq!(delta.iter().map(|r| r.total as i64).sum::<i64>(), 700);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn workbuddy_parse_reads_provider_data_raw_usage() {
+        // 真实样本结构：用量挂在 providerData.rawUsage（OpenAI 风格），
+        // prompt_tokens 已含缓存命中；model 取 requestModelName，ts 取 record.timestamp
+        let line = serde_json::json!({
+            "type": "function_call",
+            "timestamp": 1791872008668i64,
+            "providerData": {
+                "model": "deepseek-v4.1-flash",
+                "requestModelName": "Deepseek-V4.1-Flash",
+                "messageId": "01a133e4ebee7b02b46a2d41f863e617",
+                "rawUsage": {
+                    "prompt_tokens": 34392, "completion_tokens": 350, "total_tokens": 34742,
+                    "prompt_cache_hit_tokens": 0, "prompt_cache_miss_tokens": 34392,
+                    "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "credit": 0
+                }
+            }
+        });
+        let rec = parse_workbuddy_record(&line).expect("应解析出记录");
+        assert_eq!(rec.total, 34742.0);
+        assert_eq!(rec.input, Some(34392.0));
+        assert_eq!(rec.output, Some(350.0));
+        assert_eq!(rec.cache_read, Some(0.0));
+        assert_eq!(rec.model.as_deref(), Some("Deepseek-V4.1-Flash"));
+        assert_eq!(rec.ts, Some(1791872008668));
+        assert_eq!(rec.cost, None, "credit=0 不应写入费用");
+
+        // 无 rawUsage 的记录（message/reasoning 等）不产生用量
+        let no_usage = serde_json::json!({ "type": "reasoning", "timestamp": 1i64, "providerData": {} });
+        assert!(parse_workbuddy_record(&no_usage).is_none());
+
+        // credit>0 时才计费用
+        let paid = serde_json::json!({
+            "timestamp": 1791872008668i64,
+            "providerData": { "rawUsage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "credit": 0.02 } }
+        });
+        let rec2 = parse_workbuddy_record(&paid).expect("应解析出记录");
+        assert_eq!(rec2.total, 15.0);
+        assert_eq!(rec2.cost, Some(0.02));
     }
 
     #[test]

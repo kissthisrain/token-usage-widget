@@ -1,4 +1,4 @@
-// 工具自动探测：扫描已知路径，识别 ZCode / Codex / OpenCode CLI（对齐 core/detect.js）
+// 工具自动探测：扫描已知路径，识别 ZCode / Codex / DSH / WorkBuddy / OpenCode CLI（对齐 core/detect.js）
 
 use crate::config::SourceConfig;
 use crate::sources::local_logs::{list_jsonl_files, parse_file, scan_params_for_source};
@@ -74,6 +74,15 @@ fn profiles() -> Vec<Profile> {
             recursive: true,
             live: true,
             desc: "DeepSeek Harness 会话记录（实时写入）",
+        },
+        Profile {
+            id: "workbuddy",
+            name: "WorkBuddy",
+            tool: "workbuddy",
+            paths: vec![home.join(".workbuddy-ai").join("projects")],
+            recursive: true,
+            live: true,
+            desc: "WorkBuddy（本 agent）会话记录（实时写入，含每轮请求用量）",
         },
         Profile {
             id: "opencode",

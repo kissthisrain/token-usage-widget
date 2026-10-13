@@ -84,7 +84,7 @@ function renderEditor() {
   if (s.type === 'local-logs') {
     body = `
       <div class="field"><label>工具类型</label><select id="e-tool">
-        ${['zcode', 'codex', 'dsh', 'custom'].map((t) => `<option value="${t}" ${s.tool === t ? 'selected' : ''}>${t === 'zcode' ? 'ZCode' : t === 'codex' ? 'Codex' : t === 'dsh' ? 'DSH' : '自定义'}</option>`).join('')}
+        ${['zcode', 'codex', 'dsh', 'workbuddy', 'custom'].map((t) => `<option value="${t}" ${s.tool === t ? 'selected' : ''}>${t === 'zcode' ? 'ZCode' : t === 'codex' ? 'Codex' : t === 'dsh' ? 'DSH' : t === 'workbuddy' ? 'WorkBuddy' : '自定义'}</option>`).join('')}
       </select></div>
       <div class="field"><label>记录目录路径</label><input id="e-path" value="${U.esc(s.path || '')}" placeholder="如 C:\\Users\\xxx\\.zcode\\cli\\rollout" /></div>
       <div class="field" id="f-sqlite" ${s.tool === 'zcode' ? '' : 'style="display:none"'}>
@@ -327,7 +327,7 @@ async function renderDetections() {
         id: 'src_' + t.id + '_' + Date.now().toString(36),
         type: 'local-logs',
         tool: t.tool,
-        name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id,
+        name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id === 'workbuddy' ? 'WorkBuddy' : t.id,
         path: t.path,
         enabled: true,
         displayOrder: cfg.sources.length,
