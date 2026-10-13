@@ -43,14 +43,21 @@ jobs:
         run: cargo build --release --manifest-path src-tauri/Cargo.toml
 
       # ---- 发布说明：本地 notes/<tag>.md 优先，缺失则自动生成 ----
+      # 注意：以下「解析 tag / 重命名产物 / 检查说明」三步只在 tag 触发时执行。
+      # 手动在分支上跑（用于预热缓存）时 GITHUB_REF 是 refs/heads/xxx，
+      # 若不加守卫，${GITHUB_REF#refs/tags/} 剥不掉前缀，产物名会变成带斜杠的
+      # token-usage-widget-refs/heads/xxx.exe，mv 因目录不存在而失败 → 整个 job 失败
+      # → 缓存也不会被保存（actions/cache 只在 job 成功时保存）。
       - name: 解析当前 tag 名称
         id: tag
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: echo "tag=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
 
       # 给 exe 加上版本号后缀，避免不同 release 产物重名
       - name: 重命名 exe 产物
         id: artifact
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           src="src-tauri/target/release/token-usage-widget.exe"
@@ -60,6 +67,7 @@ jobs:
 
       - name: 检查本地发布说明文件是否存在
         id: notes
+        if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           if [ -f "notes/${{ steps.tag.outputs.tag }}.md" ]; then
