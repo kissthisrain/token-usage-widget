@@ -271,6 +271,8 @@
   min-width: 78px;
 }
 .model-nums .cost { color: #ffd9a0; margin-left: 5px; }
+/* 积分（非货币，如 WorkBuddy）：用中性色与代表金额的暖黄色区分，悬浮有「消耗积分」解释 */
+.model-nums .credits { color: var(--text-dim); margin-left: 5px; cursor: help; }
 .model-nums .share { color: var(--accent); font-weight: 700; margin-left: 6px; }
 
 /* ---- 图表 ---- */

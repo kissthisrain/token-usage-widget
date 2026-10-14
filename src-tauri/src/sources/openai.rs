@@ -63,6 +63,7 @@ pub fn parse_usage_payload(payload: &serde_json::Value) -> Vec<RecordIn> {
                 total,
                 cache_read: None,
                 cost,
+                credits: None,
             });
         }
     }

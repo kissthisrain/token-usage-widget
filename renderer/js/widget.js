@@ -240,11 +240,13 @@ function renderModels(s) {
     const share = Math.round((m.tokens / total) * 100);
     const pct = Math.max(2, share); // 最小可见条
     const cost = m.cost > 0 ? `<span class="cost">${U.fmtMoney(m.cost, 'USD')}</span>` : '';
+    // 积分（如 WorkBuddy 的 credit）不是货币 → 用专用符号（非 $），悬浮解释含义
+    const credits = m.credits > 0 ? `<span class="credits" title="消耗积分">${U.fmtCredits(m.credits)}</span>` : '';
     const zeroCls = share === 0 ? ' zero' : '';
     return `<div class="model-row${zeroCls}">
       <div class="model-top">
         <span class="model-name">${ico}${U.esc(m.model)}<span class="src-tag">${U.esc(m.sourceName || '')}</span></span>
-        <span class="model-nums">${U.fmtCompact(m.tokens)}${cost}${share > 0 ? `<span class="share">${share}%</span>` : ''}</span>
+        <span class="model-nums">${U.fmtCompact(m.tokens)}${cost}${credits}${share > 0 ? `<span class="share">${share}%</span>` : ''}</span>
       </div>
       <div class="bar"><i style="width:${pct}%"></i></div>
     </div>`;

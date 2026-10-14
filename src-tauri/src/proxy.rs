@@ -482,6 +482,7 @@ impl GoProxyInner {
                 total,
                 cache_read: None,
                 cost,
+                credits: None,
             }],
             true,
             false,

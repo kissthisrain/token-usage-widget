@@ -163,6 +163,11 @@ impl Watcher {
         if self.inner.history.get_dsh_seed_fix() == 0 {
             self.migrate_dsh_seed_fix(&sources);
         }
+        // 一次性迁移：WorkBuddy 的 credit 曾被误当美元写进 cost，旧数据需整源重建
+        // 才能纠正（workbuddy 走 offset 增量，不会重解析旧记录）。同样须在初始扫描前完成。
+        if self.inner.history.get_workbuddy_credits_fix() == 0 {
+            self.migrate_workbuddy_credits_fix(&sources);
+        }
         for src in &sources {
             self.inner.watch_source(src);
         }
@@ -230,6 +235,42 @@ impl Watcher {
             self.inner.rebuild_source(src, params);
         }
         self.inner.history.set_dsh_seed_fix();
+        for (src, _) in &targets {
+            let _ = self.inner.app.emit(
+                "data:update",
+                DataUpdate {
+                    source_id: Some(src.id.clone()),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+
+    /// 一次性迁移：清空全部 workbuddy 源历史 + 重置文件偏移，随后由初始扫描全量重扫。
+    /// 旧实现把 `rawUsage.credit`（积分）写进了 `cost`（美元），导致积分被当成金额显示。
+    /// 新解析器改写入 `credits`，但 workbuddy 走文件 offset 增量、不会重解析旧记录，
+    /// 故需整源重建才能让旧数据的错误 `cost` 消失、积分归入 `credits`。
+    /// 同步执行（不走 spawn_blocking），保证「清空 → 重扫」之间无并发增量扫描插入。
+    fn migrate_workbuddy_credits_fix(&self, sources: &[SourceConfig]) {
+        let targets: Vec<(SourceConfig, ScanParams)> = sources
+            .iter()
+            .filter(|s| s.type_ == "local-logs" && s.enabled && s.tool.as_deref() == Some("workbuddy"))
+            .map(|s| (s.clone(), scan_params_for_source(s)))
+            .collect();
+        if targets.is_empty() {
+            // 未配置 workbuddy 源：无需迁移，但也要落标记，避免每次启动重复判断
+            self.inner.history.set_workbuddy_credits_fix();
+            return;
+        }
+        log::info!(
+            "[watcher] WorkBuddy 积分口径迁移：清空 {} 个 workbuddy 源并全量重扫（旧数据备份为 history.json.pre-wb-credits.bak）",
+            targets.len()
+        );
+        self.inner.history.backup_before_wb_credits_fix();
+        for (src, params) in &targets {
+            self.inner.rebuild_source(src, params);
+        }
+        self.inner.history.set_workbuddy_credits_fix();
         for (src, _) in &targets {
             let _ = self.inner.app.emit(
                 "data:update",

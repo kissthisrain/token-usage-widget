@@ -26,8 +26,12 @@ pub struct DayModel {
     pub input: f64,
     #[serde(default)]
     pub output: f64,
+    /// 美元费用（不含积分）
     #[serde(default)]
     pub cost: f64,
+    /// 积分消耗（非货币，如 WorkBuddy）
+    #[serde(default)]
+    pub credits: f64,
     #[serde(default)]
     pub calls: u64,
 }
@@ -46,6 +50,8 @@ pub struct RecentRecord {
     pub total: f64,
     #[serde(default)]
     pub cost: Option<f64>,
+    #[serde(default)]
+    pub credits: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default, Debug)]
@@ -158,6 +164,12 @@ pub struct History {
     /// 启动时对所有 dsh 源清空重扫一次；1 = 已完成。老 history.json 反序列化默认 0 → 自动迁移。
     #[serde(default)]
     pub dsh_seed_fix: u64,
+    /// 一次性迁移水位：WorkBuddy 的 `rawUsage.credit` 是「积分」而非美元，旧实现误写入
+    /// `cost`，导致积分被当成金额显示（实测 GPT-6-Luna 的 10.98 积分显示为 $10.98）。
+    /// 0 = 尚未迁移，启动时对所有 workbuddy 源清空重扫一次（新解析器写入 credits）；
+    /// 1 = 已完成。老 history.json 反序列化默认 0 → 自动迁移。
+    #[serde(default)]
+    pub workbuddy_credits_fix: u64,
     #[serde(default)]
     pub last_updated: i64,
 }
@@ -186,7 +198,11 @@ pub struct RecordIn {
     pub output: Option<f64>,
     pub total: f64,
     pub cache_read: Option<f64>,
+    /// 费用（美元）。仅在线源与 API 返回的计价使用；与 `credits` 互斥。
     pub cost: Option<f64>,
+    /// 积分消耗（非货币，如 WorkBuddy 的 `rawUsage.credit`）。
+    /// 与 `cost` 分开累计，绝不混入美元合计。
+    pub credits: Option<f64>,
 }
 
 pub struct HistoryStore {
@@ -343,6 +359,11 @@ impl HistoryStore {
                         a.cost += c;
                     }
                 }
+                if let Some(c) = r.credits {
+                    if c.is_finite() {
+                        a.credits += c;
+                    }
+                }
                 a.calls += 1;
                 if use_recent && ts >= now - RECENT_KEEP_DAYS * 86400000 {
                     h.recent.push(RecentRecord {
@@ -353,6 +374,7 @@ impl HistoryStore {
                         output: r.output.unwrap_or(0.0),
                         total: r.total,
                         cost: r.cost.filter(|c| c.is_finite()),
+                        credits: r.credits.filter(|c| c.is_finite()),
                     });
                 }
                 changed = true;
@@ -543,6 +565,11 @@ impl HistoryStore {
             if let Some(c) = r.cost {
                 if c.is_finite() {
                     a.cost += c;
+                }
+            }
+            if let Some(c) = r.credits {
+                if c.is_finite() {
+                    a.credits += c;
                 }
             }
             a.calls += 1;
@@ -749,6 +776,20 @@ impl HistoryStore {
         self.save_now();
     }
 
+    /// WorkBuddy 积分口径迁移是否已完成（见 History::workbuddy_credits_fix）
+    pub fn get_workbuddy_credits_fix(&self) -> u64 {
+        self.inner.lock().unwrap().workbuddy_credits_fix
+    }
+
+    /// 标记 WorkBuddy 积分口径迁移已完成并立即落盘（避免迁移后被重复执行）
+    pub fn set_workbuddy_credits_fix(&self) {
+        {
+            let mut h = self.inner.lock().unwrap();
+            h.workbuddy_credits_fix = 1;
+        }
+        self.save_now();
+    }
+
     // ---------- 聚合 ----------
 
     #[allow(clippy::type_complexity)]
@@ -782,6 +823,7 @@ impl HistoryStore {
 
         let mut tokens: f64 = 0.0;
         let mut cost: f64 = 0.0;
+        let mut credits: f64 = 0.0;
         let mut cost_partial = false;
         // `${sid}|${model}` → ModelAgg（聚合期无 sourceName）
         let mut model_map: HashMap<String, ModelAgg> = HashMap::new();
@@ -815,12 +857,14 @@ impl HistoryStore {
                         source_name: None,
                         tokens: 0.0,
                         cost: 0.0,
+                        credits: 0.0,
                         cost_partial: false,
                         calls: 0,
                         pct: 0,
                     });
                     mm.tokens += a.tokens;
                     mm.cost += a.cost;
+                    mm.credits += a.credits;
                     mm.calls += a.calls;
                 }
             }
@@ -885,6 +929,7 @@ impl HistoryStore {
         for mm in model_map.values() {
             tokens += mm.tokens;
             cost += mm.cost;
+            credits += mm.credits;
         }
         // recent 中 cost 为 null 的记录 → costPartial（只统计当前筛选范围内，
         // 避免 35 天前的一笔无价记录让 DAY 视图也显示"~"）
@@ -930,6 +975,7 @@ impl HistoryStore {
             totals: Totals {
                 tokens,
                 cost,
+                credits,
                 cost_partial,
             },
             models,
@@ -1023,6 +1069,17 @@ impl HistoryStore {
             let _ = std::fs::copy(&self.file, self.file.with_extension("json.pre-seed-fix.bak"));
         }
     }
+
+    /// WorkBuddy 积分口径迁移前快照备份：history.json.pre-wb-credits.bak
+    ///（该迁移会清空 workbuddy 源历史并重扫，保留旧文件便于核对/回退）
+    pub fn backup_before_wb_credits_fix(&self) {
+        if self.no_persist {
+            return;
+        }
+        if self.file.exists() {
+            let _ = std::fs::copy(&self.file, self.file.with_extension("json.pre-wb-credits.bak"));
+        }
+    }
 }
 
 // ---------- 聚合返回结构 ----------
@@ -1031,7 +1088,10 @@ impl HistoryStore {
 #[serde(rename_all = "camelCase")]
 pub struct Totals {
     pub tokens: f64,
+    /// 美元费用合计（不含积分）
     pub cost: f64,
+    /// 积分消耗合计（非货币）
+    pub credits: f64,
     pub cost_partial: bool,
 }
 
@@ -1044,6 +1104,8 @@ pub struct ModelAgg {
     pub source_name: Option<String>,
     pub tokens: f64,
     pub cost: f64,
+    /// 积分消耗（非货币，如 WorkBuddy）；与 cost 分开，不参与美元合计
+    pub credits: f64,
     pub cost_partial: bool,
     pub calls: u64,
     pub pct: i64,
@@ -1089,6 +1151,7 @@ mod tests {
             output: 0.0,
             total,
             cost: None,
+            credits: None,
         }
     }
 
@@ -1112,6 +1175,7 @@ mod tests {
             total,
             cache_read: None,
             cost: None,
+            credits: None,
         }
     }
 
@@ -1121,8 +1185,38 @@ mod tests {
             input: 0.0,
             output: 0.0,
             cost: 0.0,
+            credits: 0.0,
             calls,
         }
+    }
+
+    /// 回归：积分（credits）与美元费用（cost）必须分开累计，绝不混入同一合计
+    /// （WorkBuddy 的 rawUsage.credit 是积分，曾被误当美元显示为 $19.20）
+    #[test]
+    fn credits_stay_separate_from_cost() {
+        let store = HistoryStore::new_memory();
+        store.add_records(
+            "workbuddy-intl",
+            vec![RecordIn {
+                ts: Some(crate::util::now_ms()),
+                model: Some("m".into()),
+                provider: None,
+                input: Some(0.0),
+                output: Some(0.0),
+                total: 10.0,
+                cache_read: None,
+                cost: None,
+                credits: Some(3.5),
+            }],
+            true,
+            false,
+        );
+        let day = crate::util::date_key(crate::util::now_ms());
+        let h = store.data();
+        let a = &h.days[&day]["workbuddy-intl"]["m"];
+        assert_eq!(a.tokens, 10.0);
+        assert_eq!(a.cost, 0.0, "积分不得计入美元费用");
+        assert_eq!(a.credits, 3.5, "积分应单独累计");
     }
 
     /// 关键回归：recover 多次调用不应重复累加同一批 recent
@@ -1143,6 +1237,7 @@ mod tests {
                     total: 100.0,
                     cache_read: None,
                     cost: None,
+                    credits: None,
                 },
                 RecordIn {
                     ts: Some(2_000),
@@ -1153,6 +1248,7 @@ mod tests {
                     total: 200.0,
                     cache_read: None,
                     cost: None,
+                    credits: None,
                 },
                 RecordIn {
                     ts: Some(3_000),
@@ -1163,6 +1259,7 @@ mod tests {
                     total: 300.0,
                     cache_read: None,
                     cost: None,
+                    credits: None,
                 },
             ],
             true,
@@ -1219,6 +1316,7 @@ mod tests {
                 input: 0.0,
                 output: 0.0,
                 cost: 0.0,
+                credits: 0.0,
                 calls: 2,
             },
         );
@@ -1396,6 +1494,7 @@ mod tests {
                 total: 100.0,
                 cache_read: None,
                 cost: None,
+                credits: None,
             }],
             true,
             false,
@@ -1411,6 +1510,7 @@ mod tests {
                 total: 999.0,
                 cache_read: None,
                 cost: None,
+                credits: None,
             }],
             true,
             false,

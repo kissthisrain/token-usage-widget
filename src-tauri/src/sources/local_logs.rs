@@ -39,7 +39,9 @@ pub fn scan_params_for_source(src: &SourceConfig) -> ScanParams {
             format: "dsh".to_string(),
         }
     } else if tool == "workbuddy" {
-        // WorkBuddy（本 agent）：~/.workbuddy-ai/projects/<项目slug>/<会话uuid>.jsonl（追加式）。
+        // WorkBuddy（两版共用本解析器）：
+        //   国际版 ~/.workbuddy-ai/projects/<项目slug>/<会话uuid>.jsonl
+        //   国内版 ~/.workbuddy/projects/<项目slug>/<会话uuid>.jsonl（追加式，结构一致）
         // 同目录的 <uuid>.file-rollback.ndjson 扩展名为 .ndjson，不匹配 `\.jsonl$`，天然排除。
         ScanParams {
             recursive: true,
@@ -99,6 +101,7 @@ pub fn parse_zcode_record(r: &Value) -> Option<RecordIn> {
         total,
         cache_read: num("cacheReadTokens", "cached_input_tokens"),
         cost: None,
+        credits: None,
     })
 }
 
@@ -276,6 +279,7 @@ fn parse_dsh_record(r: &Value) -> Option<RecordIn> {
         total,
         cache_read: usage.get("cacheReadTokens").and_then(Value::as_f64),
         cost: None,
+        credits: None,
     })
 }
 
@@ -390,6 +394,7 @@ pub fn parse_codex_file(file_path: &Path) -> (Vec<(RecordIn, u64)>, Vec<QuotaIte
                             total,
                             cache_read: u.get("cached_input_tokens").and_then(Value::as_f64),
                             cost: None,
+                            credits: None,
                         },
                         content_end,
                     ));
@@ -436,8 +441,9 @@ pub fn parse_workbuddy_record(r: &Value) -> Option<RecordIn> {
         .and_then(Value::as_str)
         .map(|s| s.to_string());
     let num = |k: &str| u.get(k).and_then(Value::as_f64);
-    // credit 为 0 表示走免费额度/未计价 → 不写 cost，避免把 0 当成真实费用
-    let cost = num("credit").filter(|c| *c > 0.0);
+    // rawUsage.credit 是「积分」而非美元 → 记入 credits（不写 cost），
+    // 避免积分被当成美元混进费用合计；credit 为 0 表示免费额度/未计价，不记。
+    let credits = num("credit").filter(|c| *c > 0.0);
     Some(RecordIn {
         ts,
         model,
@@ -446,7 +452,8 @@ pub fn parse_workbuddy_record(r: &Value) -> Option<RecordIn> {
         output: num("completion_tokens"),
         total,
         cache_read: num("prompt_cache_hit_tokens").or_else(|| num("cache_read_input_tokens")),
-        cost,
+        cost: None,
+        credits,
     })
 }
 
@@ -643,20 +650,22 @@ mod tests {
         assert_eq!(rec.cache_read, Some(0.0));
         assert_eq!(rec.model.as_deref(), Some("Deepseek-V4.1-Flash"));
         assert_eq!(rec.ts, Some(1791872008668));
-        assert_eq!(rec.cost, None, "credit=0 不应写入费用");
+        assert_eq!(rec.cost, None, "workbuddy 不写美元费用");
+        assert_eq!(rec.credits, None, "credit=0 不记积分");
 
         // 无 rawUsage 的记录（message/reasoning 等）不产生用量
         let no_usage = serde_json::json!({ "type": "reasoning", "timestamp": 1i64, "providerData": {} });
         assert!(parse_workbuddy_record(&no_usage).is_none());
 
-        // credit>0 时才计费用
+        // credit>0 时记入「积分」（不是美元费用）
         let paid = serde_json::json!({
             "timestamp": 1791872008668i64,
             "providerData": { "rawUsage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "credit": 0.02 } }
         });
         let rec2 = parse_workbuddy_record(&paid).expect("应解析出记录");
         assert_eq!(rec2.total, 15.0);
-        assert_eq!(rec2.cost, Some(0.02));
+        assert_eq!(rec2.cost, None, "积分不能写成美元费用");
+        assert_eq!(rec2.credits, Some(0.02), "credit 应记入积分");
     }
 
     #[test]

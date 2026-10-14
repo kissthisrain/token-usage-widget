@@ -30,6 +30,20 @@ function fmtMoney(n, currency) {
   return sym + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/** 积分符号（非货币单位，如 WorkBuddy 的 credit）：不用 $ 等货币符号，避免被误读成金额。
+ *  实心菱形 ⬥（U+2B25）。末尾 U+FE0E 为「文本呈现」变体选择符，强制单色
+ *  （否则部分环境会回退成彩色 emoji 字形）。
+ *  悬浮到数值上会有「消耗积分」提示解释其含义。改这里即可全局换符号。 */
+const CREDITS_SYM = '\u2B25\uFE0E';
+
+/** 积分（非货币，如 WorkBuddy 的 credit）：符号 + 数值，与 $10.98 同风格（无空格） */
+function fmtCredits(n) {
+  if (n == null || !isFinite(n)) return '—';
+  const v = Number(n);
+  if (v >= 1e6) return CREDITS_SYM + fmtCompact(v);
+  return CREDITS_SYM + v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function fmtCountdown(ms) {
   const s = Math.max(0, Math.floor(ms / 1000));
   const d = Math.floor(s / 86400);
@@ -75,4 +89,4 @@ function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
-window.U = { pad2, fmtInt, fmtCompact, fmtMoney, fmtCountdown, fmtDateShort, animateNumber, modelColor, esc, isCny, moneySym };
+window.U = { pad2, fmtInt, fmtCompact, fmtMoney, fmtCredits, fmtCountdown, fmtDateShort, animateNumber, modelColor, esc, isCny, moneySym };

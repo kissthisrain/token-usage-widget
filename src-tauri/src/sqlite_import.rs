@@ -108,6 +108,7 @@ fn import_blocking(
                 input: 0.0,
                 output: 0.0,
                 cost: 0.0,
+                credits: 0.0,
                 calls: 0,
             });
         a.tokens += total;
