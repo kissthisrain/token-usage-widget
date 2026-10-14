@@ -76,13 +76,23 @@ fn profiles() -> Vec<Profile> {
             desc: "DeepSeek Harness 会话记录（实时写入）",
         },
         Profile {
-            id: "workbuddy",
-            name: "WorkBuddy",
+            id: "workbuddy-intl",
+            name: "workbuddy-intl",
+            // 两版日志格式完全一致 → 共用同一个 tool（解析器），仅 id/name/路径不同
             tool: "workbuddy",
             paths: vec![home.join(".workbuddy-ai").join("projects")],
             recursive: true,
             live: true,
-            desc: "WorkBuddy（本 agent）会话记录（实时写入，含每轮请求用量）",
+            desc: "WorkBuddy 国际版会话记录（~/.workbuddy-ai/projects · workbuddy.ai，实时写入）",
+        },
+        Profile {
+            id: "workbuddy-cn",
+            name: "workbuddy-cn",
+            tool: "workbuddy",
+            paths: vec![home.join(".workbuddy").join("projects")],
+            recursive: true,
+            live: true,
+            desc: "WorkBuddy 国内版会话记录（~/.workbuddy/projects · workbuddy.cn，实时写入）",
         },
         Profile {
             id: "opencode",

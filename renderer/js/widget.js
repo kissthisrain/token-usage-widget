@@ -482,7 +482,7 @@ async function enableSelectedTools() {
       id: 'src_' + t.id + '_' + Date.now().toString(36),
       type: 'local-logs',
       tool: t.tool,
-      name: t.id === 'zcode' ? 'ZCode' : t.id === 'codex' ? 'Codex' : t.id === 'dsh' ? 'DSH' : t.id === 'workbuddy' ? 'WorkBuddy' : t.id,
+      name: t.name || t.id,
       path: t.path,
       enabled: true,
       displayOrder: cfg.sources.length,
